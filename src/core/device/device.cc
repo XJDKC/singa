@@ -44,9 +44,9 @@ void Device::ExecBuffOps() {
   buffer=false;
   while (!buffOps.empty())
   {
-	  printf("EnterBuffStart, %d\n", buffOps.size());
-  	DoExec(std::move(buffOps.front()), 0);
-  	buffOps.erase(buffOps.begin());
+    printf("EnterBuffStart, %d\n", buffOps.size());
+    DoExec(std::move(buffOps.front()), 0);
+    buffOps.erase(buffOps.begin());
     printf("EnterBuffExit\n");
   }
   buffer=true;

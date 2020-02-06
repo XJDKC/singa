@@ -802,10 +802,11 @@ GenBinaryTensorFn(ReLUBackward, ReLUBackward);
 
 #define EltwiseTensorScalarFn(fn, t, x, ret)                            \
   do {                                                                  \
+  LOG(INFO) << &t << " " << ret;\
     TYPE_LANG_SWITCH(t.data_type(), DType, t.device()->lang(), Lang, {  \
       static_assert(std::is_same<SType, DType>::value,                  \
                     "The Scalar type must match the Tensor data type"); \
-      ret->device()->Exec([t, x, ret](Context * ctx) {                  \
+      ret->device()->Exec([&t, x, ret](Context * ctx) {                  \
         fn<DType, Lang>(t, x, ret, ctx);     \
       }, {t.block()}, {ret->block()});                                  \
     });                                                                 \
