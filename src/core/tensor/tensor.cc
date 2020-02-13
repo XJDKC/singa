@@ -680,7 +680,6 @@ void Tensor::GetValue(SType *value, const size_t num) {
   Tensor* t = new Tensor(shape_, device_, data_type_);
   // transform function arrange data in memory considering stride
   singa::Transform(*this, t);
-  device_->ExecBuffOps();
   auto ptr = static_cast<const SType*>(t->block()->data());
   for (size_t i = 0; i < num; i++) value[i] = ptr[i];
 }
