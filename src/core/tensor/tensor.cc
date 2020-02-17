@@ -1248,9 +1248,10 @@ template <typename SType>
 void Axpy(const SType alpha, const Tensor &in, Tensor *out) {
   TYPE_LANG_SWITCH(in.data_type(), DType, in.device()->lang(), Lang, {
     auto a = TypeCast<SType, DType>(alpha);
-    out->device()->Exec([a, in, out](Context * ctx) {
-      Axpy<DType, Lang>(a, in, out, ctx);
-    }, {in.block(), out->block()}, {out->block()});
+    Tensor *tmp = new Tensor(*out);
+    out->device()->Exec([a, in, tmp](Context * ctx) {
+      Axpy<DType, Lang>(a, in, tmp, ctx);
+    }, {in.block(), tmp->block()}, {tmp->block()});
   });
 }
 
