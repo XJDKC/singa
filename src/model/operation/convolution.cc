@@ -502,7 +502,7 @@ Tensor GpuConvForward(const Tensor &x, const Tensor &W, const Tensor &b,
   auto dev = x.device();
 
   Shape shape{cch.batchsize, cch.num_filters, cch.conv_height, cch.conv_width};
-  Tensor *output = new Tensor(shape, dev, dtype);
+  auto output = std::make_shared<Tensor>(shape, dev, dtype);
 
   output->device()->Exec([output, &x, &W, &cch](Context * ctx) {
     Block *inblock = x.block(), *outblock = output->block(),
@@ -533,7 +533,7 @@ Tensor GpuConvBackwardx(const Tensor &dy, const Tensor &W, const Tensor &x,
                         const CudnnConvHandle &cch) {
   CHECK_EQ(dy.device()->lang(), kCuda);
 
-  Tensor *dx = new Tensor();
+  auto dx = std::make_shared<Tensor>();
   dx->ResetLike(x);
 
   dy.device()->Exec([dx, dy, &W, &cch](Context * ctx) {
@@ -555,7 +555,7 @@ Tensor GpuConvBackwardW(const Tensor &dy, const Tensor &x, const Tensor &W,
                         const CudnnConvHandle &cch) {
   CHECK_EQ(dy.device()->lang(), kCuda);
 
-  Tensor *dW = new Tensor();
+  auto dW = std::make_shared<Tensor>();
   dW->ResetLike(W);
 
   dy.device()->Exec([dW, dy, &x, &cch](Context * ctx) {
@@ -578,7 +578,7 @@ Tensor GpuConvBackwardb(const Tensor &dy, const Tensor &b,
                         const CudnnConvHandle &cch) {
   CHECK_EQ(dy.device()->lang(), kCuda);
 
-  Tensor *db = new Tensor();
+  auto db = std::make_shared<Tensor>();
   db->ResetLike(b);
 
   dy.device()->Exec([db, dy, &cch](Context * ctx) {
