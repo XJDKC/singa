@@ -14,7 +14,6 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-
 '''This module includes a set of optimizers for updating model parameters.
 It replaces the old optimizers from optimizer.py'''
 
@@ -24,7 +23,7 @@ from . import singa_wrap as singa
 
 
 class Optimizer(object):
-    r"""Base optimizer.
+    """Base optimizer.
 
     Args:
         config (Dict): specify the default values of configurable variables.
@@ -37,7 +36,7 @@ class Optimizer(object):
         self.param2state = {}
 
     def update(self, param, grad):
-        r"""Update the param values with given gradients.
+        """Update the param values with given gradients.
 
         Args:
             param(Tensor): param values to be updated in-place
@@ -47,7 +46,7 @@ class Optimizer(object):
         pass
 
     def step(self):
-        r"""To increment the step counter"""
+        """To increment the step counter"""
         self.iter += 1
 
     def register(self, param_group, config):
@@ -64,7 +63,7 @@ class Optimizer(object):
 
 
 class SGD(Optimizer):
-    r"""Implements stochastic gradient descent (optionally with momentum).
+    """Implements stochastic gradient descent (optionally with momentum).
 
     Nesterov momentum is based on the formula from
     `On the importance of initialization and momentum in deep learning`__.
@@ -76,7 +75,7 @@ class SGD(Optimizer):
         dampening(float, optional): dampening for momentum(default: 0)
         nesterov(bool, optional): enables Nesterov momentum(default: False)
 
-    Example:
+    Typical usage example:
         >> > from singa import opt
         >> > optimizer = opt.SGD(lr=0.1, momentum=0.9)
         >> > optimizer.update()
@@ -106,16 +105,23 @@ class SGD(Optimizer):
         The Nesterov version is analogously modified.
     """
 
-    def __init__(self, lr=0.1, momentum=0, dampening=0,
-                 weight_decay=0, nesterov=False):
+    def __init__(self,
+                 lr=0.1,
+                 momentum=0,
+                 dampening=0,
+                 weight_decay=0,
+                 nesterov=False):
         if momentum < 0.0:
             raise ValueError("Invalid momentum value: {}".format(momentum))
         if weight_decay < 0.0:
             raise ValueError(
                 "Invalid weight_decay value: {}".format(weight_decay))
 
-        defaults = dict(lr=lr, momentum=momentum, dampening=dampening,
-                        weight_decay=weight_decay, nesterov=nesterov)
+        defaults = dict(lr=lr,
+                        momentum=momentum,
+                        dampening=dampening,
+                        weight_decay=weight_decay,
+                        nesterov=nesterov)
         if nesterov and (momentum <= 0 or dampening != 0):
             raise ValueError(
                 "Nesterov momentum requires a momentum and zero dampening")
@@ -124,13 +130,13 @@ class SGD(Optimizer):
     def update(self, param, grad):
         """Performs a single optimization step.
 
-        Arguments:
+        Args:
                 param(Tensor): param values to be update in-place
                 grad(Tensor): param gradients; the values may be updated
                         in this function; cannot use it anymore
         """
-        assert param.shape == grad.shape, ("shape mismatch",
-                                           param.shape, grad.shape)
+        assert param.shape == grad.shape, ("shape mismatch", param.shape,
+                                           grad.shape)
         group = self.default_config
         if param in self.param2config:
             group = self.param2config[param]
@@ -146,8 +152,7 @@ class SGD(Optimizer):
                 self.param2state[param] = {}
             param_state = self.param2state[param]
             if 'momentum_buffer' not in param_state:
-                buf = param_state[
-                    'momentum_buffer'] = tensor.zeros_like(param)
+                buf = param_state['momentum_buffer'] = tensor.zeros_like(param)
                 buf *= momentum
                 singa.Axpy(1.0, grad.data, buf.data)
             else:
@@ -161,74 +166,170 @@ class SGD(Optimizer):
         singa.Axpy(-group['lr'], grad.data, param.data)
 
     def backward_and_update(self, loss):
+        """Performs backward propagation from the loss and parameter update.
+
+        From the loss, it performs backward propagation to get the gradients
+        and do the parameter update.
+
+        Args:
+                loss(Tensor): loss is the objective function of the deep learning model 
+                optimization, e.g. for classification problem it can be the output of the
+                softmax_cross_entropy function.
+        """
         for p, g in autograd.backward(loss):
             self.update(p, g)
 
 
 class DistOpt(object):
+    """The class is designed to wrap an optimizer to do distributed training.
 
-    def __init__(self, opt=SGD(), nccl_id=None, gpu_num=None, gpu_per_node=None, buffSize=4194304):
-        # The class is designed to wrap an optimizer to do disttributed training.
-        # opt: The optimizer to be wrapped. nDev: number of devices(GPUs) a
-        # process will control/use.
-        # nccl_id: an nccl id holder object for a unique communication id
-        # gpu_num: the GPU id in a single node
-        # gpu_per_node: the number of GPUs in a single node
-        # buffSize: the buffSize used in nccl communicator, default is 16 MB
+    This class is used to wrap an optimizer object to perform distributed training based
+    on multiprocessing. Each process has an individual rank, which gives information of
+    which GPU the individual process is using. The training data is partitioned, so that
+    each process can evaluate the sub-gradient based on the partitioned training data.
+    Once the sub-graident is calculated on each processes, the overall stochastic gradient
+    is obtained by all-reducing the sub-gradients evaluated by all processes. The all-reduce
+    operation is supported by the NVidia Collective Communication Library (NCCL).
 
-        # world_size: total number of processes.
-        # rank_in_local: local rank of a process on the current node.
-        # rank_in_global: global rank of a process
+    Args:
+        opt(Optimizer): The optimizer to be wrapped.
+        nccl_id(NcclIdHolder): an nccl id holder object for a unique communication id
+        gpu_num(int): the GPU id in a single node
+        gpu_per_node(int): the number of GPUs in a single node
+        buffSize(int): the buffSize in terms of number of elements used in nccl communicator
 
+    Attributes:
+        world_size(int): total number of processes
+        rank_in_local(int): local rank of a process on the current node
+        rank_in_global(int): global rank of a process
+
+    Typical usage example:
+        >> > from singa import opt
+        >> > optimizer = opt.SGD(lr=0.1, momentum=0.9)
+        >> > optimizer = opt.DistOpt(sgd)
+
+    """
+
+    def __init__(self,
+                 opt=SGD(),
+                 nccl_id=None,
+                 gpu_num=None,
+                 gpu_per_node=None,
+                 buffSize=4194304):
         self.opt = opt
         if nccl_id is None:
             # constructure for application using MPI
             self.communicator = singa.Communicator(buffSize)
         else:
             # constructor for application using python multi-process module
-            self.communicator = singa.Communicator(gpu_num, gpu_per_node, nccl_id, buffSize)
+            self.communicator = singa.Communicator(gpu_num, gpu_per_node,
+                                                   nccl_id, buffSize)
 
         self.world_size = self.communicator.totalMPIRanksInGlobal
         self.rank_in_local = self.communicator.MPIRankInLocal
         self.rank_in_global = self.communicator.MPIRankInGlobal
 
     def update(self, param, grad):
+        """Performs a single optimization step.
+
+        Args:
+                param(Tensor): param values to be update
+                grad(Tensor): param gradients
+        """
         grad /= self.world_size
         self.opt.update(param, grad)
 
     def all_reduce(self, tensor):
+        """Performs all reduce of a tensor for distributed training.
+
+        Args:
+                tensor(Tensor): a tensor to be all-reduced
+        """
         self.communicator.synch(tensor)
 
     def fused_all_reduce(self, tensor):
+        """Performs all reduce of the tensors after fusing them in a buffer.
+
+        Args:
+                tensor(List of Tensors): a list of tensors to be all-reduced
+        """
         tensor = singa.VecTensor(tensor)
         self.communicator.fusedSynch(tensor)
 
     def all_reduce_half(self, tensor):
+        """Performs all reduce of a tensor after converting to FP16.
+
+        Args:
+                tensor(Tensor): a tensor to be all-reduced
+        """
         self.communicator.synchHalf(tensor)
 
     def fused_all_reduce_half(self, tensor):
+        """Performs all reduce of the tensors after fusing and converting them to FP16.
+
+        Args:
+                tensor(List of Tensors): a list of tensors to be all-reduced
+        """
         tensor = singa.VecTensor(tensor)
         self.communicator.fusedSynchHalf(tensor)
 
     def sparsification(self, tensor, accumulation, spars, topK):
+        """Performs all reduce of a tensor after sparsification.
+
+        Args:
+                tensor(Tensor): a tensor to be all-reduced
+                accumulation(Tensor): local gradient accumulation
+                spars(float): a parameter to control sparsity as defined below 
+                topK(bool): When topK is False, it sparsifies the gradient with absolute 
+                value >= sparsWhen topK is True, it sparsifies a fraction of total gradient
+                number equals to spars,  E.g. when spars = 0.01, it sparsifies 1 % of the
+                total gradient elements
+        """
         if accumulation is None:
             self.communicator.sparsification(tensor, spars, topK)
         else:
             self.communicator.sparsification(tensor, accumulation, spars, topK)
 
     def fused_sparsification(self, tensor, accumulation, spars, topK):
+        """Performs all reduce of the tensors after fusing and sparsification.
+
+        Args:
+                tensor(List of Tensors): a list of tensors to be all-reduced
+                accumulation(Tensor): local gradient accumulation
+                spars(float): a parameter to control sparsity as defined below 
+                topK(bool): When topK is False, it sparsifies the gradient with absolute 
+                value >= sparsWhen topK is True, it sparsifies a fraction of total gradient
+                number equals to spars,  E.g. when spars = 0.01, it sparsifies 1 % of the
+                total gradient elements
+        """
         tensor = singa.VecTensor(tensor)
         if accumulation is None:
             self.communicator.fusedSparsification(tensor, spars, topK)
         else:
-            self.communicator.fusedSparsification(tensor, accumulation, spars, topK)
+            self.communicator.fusedSparsification(tensor, accumulation, spars,
+                                                  topK)
 
     def wait(self):
+        """Wait for the cuda streams used by the communicator to finish their operations."""
         self.communicator.wait()
 
-    def backward_and_update(self, loss, threshold = 2097152):
-        # backward propagation from the loss and parameter update
-        # it applies tensor fusion which fuses all the tensor smaller than the threshold value
+    def backward_and_update(self, loss, threshold=2097152):
+        """Performs backward propagation from the loss and parameter update.
+
+        From the loss, it performs backward propagation to get the gradients and do the parameter 
+        update. For gradient communication, it fuses all the tensor smaller than the threshold
+        value to reduce network latency.
+
+        Args:
+                loss(Tensor): loss is the objective function of the deep learning model 
+                optimization, e.g. for classification problem it can be the output of the
+                softmax_cross_entropy function.
+                threshold(int): threshold is a parameter to control performance in fusing
+                the tensors. For the tensors of sizes smaller than threshold, they are to
+                be accumulated and fused before the all reduce operation. For the tensors 
+                of its size larger than the threshold value, they are to be reduced directly
+                without fusion.
+        """
         plist = []
         acc = 0
         glist = []
@@ -238,7 +339,7 @@ class DistOpt(object):
                 self.all_reduce(g.data)
             else:
                 # smaller than threshold -> accumulate
-                glist.append(g.data)                    
+                glist.append(g.data)
                 acc += g.size()
                 if (acc > threshold):
                     self.fused_all_reduce(glist)
@@ -249,12 +350,34 @@ class DistOpt(object):
             self.fused_all_reduce(glist)
         self.wait()
         for p, g in plist:
-            self.update(p, g)  
+            self.update(p, g)
 
-    def backward_and_update_half(self, loss, threshold = 2097152, clipping = False, clip_Value = 100):
-        # THIS IS A EXPERIMENTAL FUNCTION FOR RESEARCH PURPOSE:
-        # It converts the gradients to 16 bits half precision format before allreduce
-        # To assist training, this functions provide an option to perform gradient clipping
+    def backward_and_update_half(self,
+                                 loss,
+                                 threshold=2097152,
+                                 clipping=False,
+                                 clip_Value=100):
+        """Performs backward propagation and parameter update, with FP16 precision communication. 
+
+        THIS IS A EXPERIMENTAL FUNCTION FOR RESEARCH PURPOSE:
+        From the loss, it performs backward propagation to get the gradients and do the parameter 
+        update. For gradient communication, it fuses all the tensor smaller than the threshold value
+        to reduce network latency, as well as converting them to FP16 half precision format before
+        sending them out. To assist training, this functions provide an option to perform gradient
+        clipping.
+
+        Args:
+                loss(Tensor): loss is the objective function of the deep learning model 
+                optimization, e.g. for classification problem it can be the output of the
+                softmax_cross_entropy function.
+                threshold(int): threshold is a parameter to control performance in fusing
+                the tensors. For the tensors of sizes smaller than threshold, they are to
+                be accumulated and fused before the all reduce operation. For the tensors 
+                of its size larger than the threshold value, they are to be reduced directly
+                without fusion.
+                clipping(bool): a boolean flag to choose whether to clip the gradient value
+                clip_value(float): the clip value to be used when clipping is True
+        """
         plist = []
         acc = 0
         glist = []
@@ -266,7 +389,7 @@ class DistOpt(object):
                 self.all_reduce_half(g.data)
             else:
                 # smaller than threshold -> accumulate
-                glist.append(g.data)                    
+                glist.append(g.data)
                 acc += g.size()
                 if (acc > threshold):
                     self.fused_all_reduce_half(glist)
@@ -277,13 +400,32 @@ class DistOpt(object):
             self.fused_all_reduce_half(glist)
         self.wait()
         for p, g in plist:
-            self.update(p, g)  
+            self.update(p, g)
 
-    def backward_and_partial_update(self, loss, threshold = 2097152):
-        # THIS IS A EXPERIMENTAL FUNCTION FOR RESEARCH PURPOSE:
-        # It performs asychronous training where one parameter partition is all-reduced per iteration
-        # The size of the parameter partition depends on the threshold value
-        # self.partial is the counter to determine which partition to perform all-reduce
+    def backward_and_partial_update(self, loss, threshold=2097152):
+        """Performs backward propagation from the loss and parameter update using asychronous training.
+
+        THIS IS A EXPERIMENTAL FUNCTION FOR RESEARCH PURPOSE:
+        From the loss, it performs backward propagation to get the gradients and do the parameter 
+        update. It fuses the tensors smaller than the threshold value to reduce network latency, 
+        as well as performing asychronous training where one parameter partition is all-reduced
+        per iteration. The size of the parameter partition depends on the threshold value.
+
+        Args:
+                loss(Tensor): loss is the objective function of the deep learning model 
+                optimization, e.g. for classification problem it can be the output of the
+                softmax_cross_entropy function.
+                threshold(int): threshold is a parameter to control performance in fusing
+                the tensors. For the tensors of sizes smaller than threshold, they are to
+                be accumulated and fused before the all reduce operation. For the tensors 
+                of its size larger than the threshold value, they are to be reduced directly
+                without fusion.
+
+        Attributes:
+                self.partial(int): A counter to determine which partition to perform all-reduce.
+                This counter resets to zero automatlly after an update cycle of the full parameter
+                set.
+        """
         if not hasattr(self, "partial"):
             self.partial = 0
         self.partial += 1
@@ -329,13 +471,21 @@ class DistOpt(object):
         if (k == self.partial):
             self.partial = 0
 
-    def backward_and_spars_update(self, loss, threshold = 2097152, spars = 0.05, topK = False, corr = True):
-        r"""THIS IS A EXPERIMENTAL FUNCTION FOR RESEARCH PURPOSE:
-        Performs backward propagation from the loss and parameter update with sparsification.
-        It fuses the tensors with size smaller than the threshold value to reduce network latency, as well
-        as using sparsification scheme to transfer only gradient elements which are significant.
+    def backward_and_spars_update(self,
+                                  loss,
+                                  threshold=2097152,
+                                  spars=0.05,
+                                  topK=False,
+                                  corr=True):
+        """ Performs backward propagation from the loss and parameter update with sparsification.
 
-        Arguments:
+        THIS IS A EXPERIMENTAL FUNCTION FOR RESEARCH PURPOSE:
+        From the loss, it performs backward propagation to get the gradients and do the parameter 
+        update. It fuses the tensors with size smaller than the threshold value to reduce network
+        latency, as well as using sparsification schemes to transfer only the gradient elements which
+        are significant.
+
+        Args:
                 loss(Tensor): loss is the objective function of the deep learning model 
                 optimization, e.g. for classification problem it can be the output of the
                 softmax_cross_entropy function.
@@ -368,24 +518,29 @@ class DistOpt(object):
                 k += 1
                 if (corr and (not self.sparsInit)):
                     # create a tensor for the gradient accumulation
-                    self.gradAccumulation.append(tensor.Tensor((g.size(),), p.device, p.dtype))
+                    self.gradAccumulation.append(
+                        tensor.Tensor((g.size(),), p.device, p.dtype))
                     self.gradAccumulation[k].set_value(0.0)
                 if corr:
-                    self.sparsification(g.data, self.gradAccumulation[k].data, spars, topK)
+                    self.sparsification(g.data, self.gradAccumulation[k].data,
+                                        spars, topK)
                 else:
                     self.sparsification(g.data, None, spars, topK)
             else:
                 # smaller than threshold -> accumulate
-                glist.append(g.data)                    
+                glist.append(g.data)
                 acc += g.size()
                 if (acc > threshold):
                     k += 1
                     if (corr and (not self.sparsInit)):
                         # create a tensor for the gradient accumulation
-                        self.gradAccumulation.append(tensor.Tensor((acc,), p.device, p.dtype))
+                        self.gradAccumulation.append(
+                            tensor.Tensor((acc,), p.device, p.dtype))
                         self.gradAccumulation[k].set_value(0.0)
                     if corr:
-                        self.fused_sparsification(glist, self.gradAccumulation[k].data, spars, topK)
+                        self.fused_sparsification(glist,
+                                                  self.gradAccumulation[k].data,
+                                                  spars, topK)
                     else:
                         self.fused_sparsification(glist, None, spars, topK)
                     acc = 0
@@ -395,10 +550,12 @@ class DistOpt(object):
             k += 1
             if (corr and (not self.sparsInit)):
                 # create a tensor for the gradient accumulation
-                self.gradAccumulation.append(tensor.Tensor((acc,), p.device, p.dtype))
+                self.gradAccumulation.append(
+                    tensor.Tensor((acc,), p.device, p.dtype))
                 self.gradAccumulation[k].set_value(0.0)
             if corr:
-                self.fused_sparsification(glist, self.gradAccumulation[k].data, spars, topK)
+                self.fused_sparsification(glist, self.gradAccumulation[k].data,
+                                          spars, topK)
             else:
                 self.fused_sparsification(glist, None, spars, topK)
         self.wait()

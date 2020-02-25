@@ -23,7 +23,6 @@ from singa import autograd
 from singa import optimizer
 import numpy as np
 
-
 if __name__ == "__main__":
 
     autograd.training = True
@@ -84,8 +83,7 @@ if __name__ == "__main__":
         x = autograd.relu(x)
         x = autograd.matmul(x, w1)
         x = autograd.add_bias(x, b1)
-        x = autograd.softmax(x)
-        loss = autograd.cross_entropy(x, target)
+        loss = autograd.softmax_cross_entropy(x, target)
         for p, gp in autograd.backward(loss):
             sgd.apply(0, gp, p, "")
 
