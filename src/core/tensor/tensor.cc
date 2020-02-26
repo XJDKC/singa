@@ -845,9 +845,10 @@ Tensor SoftMaxBackward(const Tensor &in, int axis, const Tensor &fdout) {
   do {                                                                     \
     TYPE_LANG_SWITCH(lhs.data_type(), DType, lhs.device()->lang(), Lang, { \
       CHECK_EQ(sizeof(DType), SizeOf(rhs.data_type()));                    \
+      auto retPtr = std::make_shared<Tensor>(*ret);                        \
       ret->device()->Exec(                                                 \
-          [lhs, rhs, ret](Context *ctx) {                                  \
-            fn<DType, Lang>(lhs, rhs, ret, ctx);                           \
+          [lhs, rhs, retPtr](Context *ctx) {                               \
+            fn<DType, Lang>(lhs, rhs, retPtr.get(), ctx);                  \
           },                                                               \
           {lhs.block(), rhs.block()}, {ret->block()});                     \
     });                                                                    \
