@@ -1392,6 +1392,8 @@ template <typename SType>
 void Mult(const SType alpha, const Tensor &A, const Tensor &B, const SType beta,
           Tensor *C) {
   CHECK_EQ(A.shape().size(), 2u);
+  vector<Block*> read_blocks = {A.block(), B.block()};
+  if (beta) read_blocks.push_back(C->block());
   if (B.nDim() == 1u) {
     TYPE_LANG_SWITCH(A.data_type(), DType, A.device()->lang(), Lang, {
       auto a = TypeCast<SType, DType>(alpha);
@@ -1401,7 +1403,7 @@ void Mult(const SType alpha, const Tensor &A, const Tensor &B, const SType beta,
           [a, A, b, B, CRef](Context *ctx) mutable {
             GEMV<DType, Lang>(a, A, B, b, &CRef, ctx);
           },
-          {A.block(), B.block()}, {C->block()});
+          read_blocks, {C->block()});
     });
   } else {
     CHECK(!C->transpose());
@@ -1413,7 +1415,7 @@ void Mult(const SType alpha, const Tensor &A, const Tensor &B, const SType beta,
           [a, A, b, B, CRef](Context *ctx) mutable {
             GEMM<DType, Lang>(a, A, B, b, &CRef, ctx);
           },
-          {A.block(), B.block()}, {C->block()});
+          read_blocks, {C->block()});
     });
   }
 }
