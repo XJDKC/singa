@@ -64,7 +64,7 @@ void Device::RunGraph(bool serial) {
 }
 
 // Todo(Wangwei) Get Block From The Memory manager
-Block* Device::NewBlock(int size) {
+Block* Device::NewBlock(size_t size) {
   CHECK_GE(size, 0)
       << "size is negative, could be caused by the type cast "
       << "from size_t to int. In that case, the size is too large.";

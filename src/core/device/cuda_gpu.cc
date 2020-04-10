@@ -111,7 +111,7 @@ size_t CudaGPU::GetAllocatedMem() {
 }
 
 /// Allocate gpu memory.
-void* CudaGPU::Malloc(int size) {
+void* CudaGPU::Malloc(size_t size) {
   void* ptr = nullptr;
   if (size > 0) {
     CUDA_CHECK(cudaSetDevice(id_));

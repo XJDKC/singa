@@ -133,7 +133,7 @@ void OpenclDevice::CopyToFrom(void* dst, const void* src, size_t nBytes,
   }
 }
 
-void* OpenclDevice::Malloc(int size) {
+void* OpenclDevice::Malloc(size_t size) {
   cl_mem buffer = memory_create(ocl::current_context(), size, nullptr);
 
   return static_cast<void*>(buffer);

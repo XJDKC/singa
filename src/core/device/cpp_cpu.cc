@@ -40,7 +40,7 @@ void CppCPU::DoExec(function<void(Context*)>&& fn, int executor) {
   fn(&ctx_);
 }
 
-void* CppCPU::Malloc(int size) {
+void* CppCPU::Malloc(size_t size) {
   if (size > 0) {
     void* ptr = malloc(size);
     memset(ptr, 0, size);

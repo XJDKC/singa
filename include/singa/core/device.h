@@ -68,7 +68,7 @@ class Device {
   static void EnableLazyAlloc(bool enbale) { lazy_alloc_ = enbale; }
 
   /// Called by Tensor.
-  Block* NewBlock(int size);
+  Block* NewBlock(size_t size);
 
   /// Called by Tensor.
   void FreeBlock(Block* block);
@@ -118,7 +118,7 @@ class Device {
                           CopyDirection direction, Context* ctx) = 0;
 
   /// Allocate device memory.
-  virtual void* Malloc(int size) = 0;
+  virtual void* Malloc(size_t size) = 0;
 
   /// Free device memory.
   virtual void Free(void* ptr) = 0;
@@ -170,7 +170,7 @@ class CppCPU : public Device {
                   CopyDirection direction, Context* ctx) override;
 
   /// Allocate cpu memory.
-  void* Malloc(int size) override;
+  void* Malloc(size_t size) override;
 
   /// Free cpu memory.
   void Free(void* ptr) override;
@@ -200,7 +200,7 @@ class CudaGPU : public Device {
                   CopyDirection direction, Context* ctx) override;
 
   /// Allocate cpu memory.
-  void* Malloc(int size) override;
+  void* Malloc(size_t size) override;
 
   /// Free cpu memory.
   void Free(void* ptr) override;
@@ -258,7 +258,7 @@ class OpenclDevice : public singa::Device {
   /// Allocates memory on this OpenCL device
   /// by creating and returning an empty cl::Buffer object.
   /// with the indicated size.
-  void* Malloc(int size) override;
+  void* Malloc(size_t size) override;
 
   /// Converts the void pointer into a Buffer object, then deletes the object.
   /// This has the effect of freeing up device memory.
