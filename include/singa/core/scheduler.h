@@ -109,6 +109,7 @@ class BlkInfo {
   Block *block() const { return blk_; }
   BlockType type() const { return type_; }
   int graph_ref() const { return graph_ref_; }
+  Node *first_node() const { return first_node_; }
   Node *write_node() const { return write_node_; }
   Node *last_node() const { return last_node_; }
 
@@ -119,6 +120,7 @@ class BlkInfo {
   Block *blk_;
   BlockType type_;
   int graph_ref_;
+  Node *first_node_;  // first node that uses the block
   Node *write_node_;  // last node that writes the block
   Node *last_node_;   // last node that uses the block
 };
@@ -167,6 +169,7 @@ class Graph {
  private:
   void Analysis();
   void FreeLoop();
+  void ReserveMem(size_t size);
   void AddSyncOp(function<void(Context *)> &&op);
 
   // static void CUDART_CB Callback(cudaStream_t stream, cudaError_t status,

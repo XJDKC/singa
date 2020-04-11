@@ -24,7 +24,7 @@ namespace singa {
 
 void* Block::mutable_data() {
   if (data_ == nullptr && size_ > 0) {
-    data_ = device_->Malloc((int)size_);
+    data_ = device_->Malloc(size_);
   }
   initialized_ = true;
   return static_cast<char*>(data_) + offset_;

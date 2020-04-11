@@ -104,6 +104,7 @@ void Graph::Reset() {
 void Graph::Debug() {
   if (dirty_) Analysis();
 
+  int w = 0;
   size_t max_in_num = 0, max_out_num = 0, max_next_num = 0, max_free_num = 0;
   for (auto &it : nodes_) {
     max_in_num = std::max(max_in_num, it->in_edges_.size());
@@ -118,11 +119,13 @@ void Graph::Debug() {
     max_free_num = std::max(max_free_num, it.size());
   }
 
-  int w = 2;
+  for (int i = std::max(nodes_.size(), blocks_.size()); i > 0; i /= 10, ++w)
+    ;
+
   std::stringstream ss;
   ss << "begin nodes:[";
   for (size_t i = 0; i < begin_nodes_.size(); ++i) {
-    ss << begin_nodes_[i]->id_;
+    ss << std::setw(w) << begin_nodes_[i]->id_ << " ";
   }
   ss << "]" << std::endl;
 
@@ -230,7 +233,7 @@ void Graph::RunGraph() {
     int curIndex = curNode->id_;
 
     // step 2: execute the operation
-    device_->DoExec(std::move(curNode->op_), 0);
+    // device_->DoExec(std::move(curNode->op_), 0);
 
     // step 3: release some blocks' data that won't be used later
     for (auto it : free_blocks_[curIndex]) {
@@ -259,7 +262,7 @@ void Graph::RunInSerial() {
     Node *curNode = nodes_[i];
 
     // step 1: execute the operation
-    device_->DoExec(std::move(curNode->op_), 0);
+    // device_->DoExec(std::move(curNode->op_), 0);
 
     // step 2: release some blocks' data that won't be used later
     for (auto it : free_blocks_[i]) {
@@ -297,6 +300,7 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
     if (it == blocks_.end()) {
       edge = new Edge(edges_.size(), blk, nullptr, node);
       blkInfo = new BlkInfo(blocks_.size(), blk, BlockType::kInput);
+      blkInfo->first_node_ = node;
       blocks_[blk] = blkInfo;
     } else {
       blkInfo = it->second;
@@ -326,6 +330,7 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
     auto it = blocks_.find(blk);
     if (it == blocks_.end()) {
       blkInfo = new BlkInfo(blocks_.size(), blk, BlockType::kEnd);
+      blkInfo->first_node_ = node;
       blocks_[blk] = blkInfo;
     } else {
       blkInfo = it->second;
@@ -385,17 +390,19 @@ void Graph::Analysis() {
     int curIndex = curNode->id_;
 
     // step 2: release some blocks' data that won't be used later
+    size_t freed_mem = 0;
     free_blocks_[curIndex].clear();
     for (size_t i = 0; i < curNode->in_edges_.size(); ++i) {
       Edge *edge = curNode->in_edges_[i];
       Block *blk = edge->blk_;
       BlkInfo *blkInfo = blocks_[blk];
+
       // if curnode is the last node accessing the block
       if (blkInfo->last_node_ == curNode) {
         BlockType type = blkInfo->type_;
         // if the block belongs to a inter tensor
         // and isn't refered on the Python Side
-        if ((type == BlockType::kInter || type == BlockType::kEnd) &&
+        if ((type == BlockType::kInter) &&
             blkInfo->graph_ref_ >= blk->ref_count()) {
           free_blocks_[curIndex].push_back(blk);
         }
@@ -436,6 +443,14 @@ void Graph::FreeLoop() {
       }
     }
   }
+}
+
+void Graph::ReserveMem(size_t size) {
+  size_t allocated_mem = device_->GetAllocatedMem();
+  size_t reserve_mem = std::max(0ul, size - allocated_mem);
+  Block *tmp = device_->NewBlock(reserve_mem);
+  tmp->mutable_data();
+  device_->FreeBlock(tmp);
 }
 
 void Graph::AddSyncOp(function<void(Context *)> &&op) {
