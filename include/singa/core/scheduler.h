@@ -24,6 +24,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "singa/core/common.h"
@@ -37,10 +38,12 @@ namespace singa {
 
 class Node;
 class Edge;
+class OpRec;
 class Graph;
 class Device;
 class BlkInfo;
 
+typedef std::vector<OpRec> OpRecVec;
 typedef std::vector<Node *> NodeVec;
 typedef std::vector<Edge *> EdgeVec;
 typedef std::vector<Block *> BlockVec;
@@ -127,6 +130,18 @@ class BlkInfo {
   NodeVec used_nodes_;  // the nodes that uses the block
 };
 
+class OpRec {
+ public:
+  OpRec();
+
+ private:
+  friend Graph;
+
+  float time_;
+  cudaEvent_t start_;
+  cudaEvent_t end_;
+};
+
 class Graph {
  public:
   struct CBData {
@@ -170,6 +185,7 @@ class Graph {
 
  private:
   void Analysis();
+  void AutoSwap();
   void FreeLoop();
   void ReserveMem(size_t size);
   void AddSyncOp(function<void(Context *)> &&op);
@@ -193,6 +209,14 @@ class Graph {
   NodeVec begin_nodes_;
   std::vector<NodeVec> next_nodes_;
   std::vector<BlockVec> free_blocks_;
+
+  // AutoSwap
+  bool initialized_ = false;
+  size_t threshold_ = 1048576;
+  cudaStream_t swap_;
+  OpRecVec node_recs_;
+  OpRecVec swap_recs_;
+  BlockVec candidates_;
 
   SafeQueue<int> free_queue_;
 };

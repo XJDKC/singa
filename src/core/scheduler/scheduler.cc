@@ -40,7 +40,14 @@ void Edge::SetSrcNode(Node *src_node) { src_node_ = src_node; }
 
 void Edge::SetDstNode(Node *dst_node) { dst_node_ = dst_node; }
 
-Graph::Graph(Device *device) : device_(device) {}
+OpRec::OpRec() : time_(0) {
+  cudaEventCreate(&start_);
+  cudaEventCreate(&end_);
+}
+
+Graph::Graph(Device *device) : device_(device) {
+  cudaStreamCreateWithFlags(&swap_, cudaStreamNonBlocking);
+}
 
 Graph::~Graph() { Reset(); }
 
@@ -240,7 +247,13 @@ void Graph::RunGraph() {
     int curIndex = curNode->id_;
 
     // step 2: execute the operation
+    if (!initialized_) {
+      cudaEventRecord(node_recs_[curIndex].start_, NULL);
+    }
     device_->DoExec(std::move(curNode->op_), 0);
+    if (!initialized_) {
+      cudaEventRecord(node_recs_[curIndex].end_, NULL);
+    }
 
     // step 3: release some blocks' data that won't be used later
     for (auto it : free_blocks_[curIndex]) {
@@ -260,6 +273,21 @@ void Graph::RunGraph() {
       node_queue.Push(it);
     }
   }
+
+  if (!initialized_) {
+    initialized_ = true;
+    size_t size = node_recs_.size();
+
+    if (size > 0) {
+      cudaEventSynchronize(node_recs_[size - 1].end_);
+    }
+
+    for (size_t i = 0; i < size; ++i) {
+      auto &rec = node_recs_[i];
+      cudaEventElapsedTime(&rec.time_, rec.start_, rec.end_);
+      // printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
+    }
+  }
 }
 
 void Graph::RunInSerial() {
@@ -269,7 +297,13 @@ void Graph::RunInSerial() {
     Node *curNode = nodes_[i];
 
     // step 1: execute the operation
+    if (!initialized_) {
+      cudaEventRecord(node_recs_[i].start_, NULL);
+    }
     device_->DoExec(std::move(curNode->op_), 0);
+    if (!initialized_) {
+      cudaEventRecord(node_recs_[i].end_, NULL);
+    }
 
     // step 2: release some blocks' data that won't be used later
     for (auto it : free_blocks_[i]) {
@@ -283,11 +317,29 @@ void Graph::RunInSerial() {
     *)(cb_data), 0));
     */
   }
+
+  if (!initialized_) {
+    initialized_ = true;
+
+    size_t size = node_recs_.size();
+    if (size > 0) {
+      cudaEventSynchronize(node_recs_[size - 1].end_);
+    }
+
+    for (size_t i = 0; i < size; ++i) {
+      auto &rec = node_recs_[i];
+      cudaEventElapsedTime(&rec.time_, rec.start_, rec.end_);
+      // printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
+    }
+  }
 }
 
 void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
                          const BlockVec &write_blocks) {
   dirty_ = true;
+  initialized_ = false;
+
+  node_recs_.resize(nodes_.size() + 1);
 
   // if the size of both read_blocks and write_blocks is zero,
   // this operation is used for synchronization
@@ -467,6 +519,8 @@ void Graph::Analysis() {
 
   // Debug();
 }
+
+void Graph::AutoSwap() {}
 
 void Graph::FreeLoop() {
   int id = 0;
