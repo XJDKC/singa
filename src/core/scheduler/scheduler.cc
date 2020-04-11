@@ -172,11 +172,13 @@ void Graph::Debug() {
     ss << "]" << std::endl;
   }
 
+  size_t max_used_num = 0;
   std::vector<BlkInfo *> blkInfos;
   blkInfos.resize(blocks_.size());
 
   for (auto it : blocks_) {
     blkInfos[it.second->id_] = it.second;
+    max_used_num = std::max(max_used_num, it.second->used_nodes_.size());
   }
 
   for (auto it : blkInfos) {
@@ -201,15 +203,20 @@ void Graph::Debug() {
         break;
     }
     int id = -1;
-    if (blkInfo->write_node_) {
-      id = blkInfo->write_node_->id_;
+    if (blkInfo->write_edge_) {
+      id = blkInfo->write_edge_->src_node_->id_;
     }
     ss << " write_node[" << std::setw(w) << id << "]";
-    id = -1;
-    if (blkInfo->last_node_) {
-      id = blkInfo->last_node_->id_;
+
+    size = blkInfo->used_nodes_.size();
+    ss << " used_nodes[";
+    for (size_t i = 0; i < max_used_num; ++i) {
+      if (i < size)
+        ss << std::setw(w) << blkInfo->used_nodes_[i]->id_ << " ";
+      else
+        ss << std::setw(w + 1) << " ";
     }
-    ss << " last_node[" << std::setw(w) << id << "]" << std::endl;
+    ss << "]" << std::endl;
   }
 
   printf("%s", ss.str().c_str());
@@ -233,7 +240,7 @@ void Graph::RunGraph() {
     int curIndex = curNode->id_;
 
     // step 2: execute the operation
-    // device_->DoExec(std::move(curNode->op_), 0);
+    device_->DoExec(std::move(curNode->op_), 0);
 
     // step 3: release some blocks' data that won't be used later
     for (auto it : free_blocks_[curIndex]) {
@@ -262,7 +269,7 @@ void Graph::RunInSerial() {
     Node *curNode = nodes_[i];
 
     // step 1: execute the operation
-    // device_->DoExec(std::move(curNode->op_), 0);
+    device_->DoExec(std::move(curNode->op_), 0);
 
     // step 2: release some blocks' data that won't be used later
     for (auto it : free_blocks_[i]) {
@@ -282,6 +289,8 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
                          const BlockVec &write_blocks) {
   dirty_ = true;
 
+  // if the size of both read_blocks and write_blocks is zero,
+  // this operation is used for synchronization
   if (read_blocks.size() == 0 && write_blocks.size() == 0) {
     AddSyncOp(std::move(op));
     return;
@@ -293,14 +302,12 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
   // create edges for read_blocks
   for (size_t i = 0; i < read_blocks.size(); ++i) {
     Block *blk = read_blocks[i];
-    Edge *edge = nullptr;
+    Node *src_node = nullptr;
     BlkInfo *blkInfo = nullptr;
 
     auto it = blocks_.find(blk);
     if (it == blocks_.end()) {
-      edge = new Edge(edges_.size(), blk, nullptr, node);
       blkInfo = new BlkInfo(blocks_.size(), blk, BlockType::kInput);
-      blkInfo->first_node_ = node;
       blocks_[blk] = blkInfo;
     } else {
       blkInfo = it->second;
@@ -308,15 +315,27 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
         blkInfo->type_ = BlockType::kInter;
       }
 
-      Node *write_node = blkInfo->write_node_;
-      edge = new Edge(edges_.size(), blk, write_node, node);
-      if (write_node) {
-        write_node->AddOutEdge(edge);
+      Edge *write_edge = blkInfo->write_edge_;
+      if (write_edge) {
+        if (!write_edge->dst_node_) {
+          // change the dst node of the write_edge
+          blkInfo->used_nodes_.push_back(node);
+          write_edge->dst_node_ = node;
+          node->AddInEdge(write_edge);
+          blkInfo->graph_ref_ += 1;
+          continue;
+        } else {
+          src_node = write_edge->src_node_;
+        }
       }
     }
 
+    Edge *edge = new Edge(edges_.size(), blk, src_node, node);
+    blkInfo->used_nodes_.push_back(node);
     blkInfo->graph_ref_ += 1;
-    blkInfo->last_node_ = node;
+    if (src_node) {
+      src_node->AddOutEdge(edge);
+    }
 
     node->AddInEdge(edge);
     edges_.push_back(edge);
@@ -330,7 +349,6 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
     auto it = blocks_.find(blk);
     if (it == blocks_.end()) {
       blkInfo = new BlkInfo(blocks_.size(), blk, BlockType::kEnd);
-      blkInfo->first_node_ = node;
       blocks_[blk] = blkInfo;
     } else {
       blkInfo = it->second;
@@ -339,9 +357,13 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
       }
     }
 
+    Edge *edge = new Edge(edges_.size(), blk, node, nullptr);
+    blkInfo->used_nodes_.push_back(node);
+    blkInfo->write_edge_ = edge;
     blkInfo->graph_ref_ += 1;
-    blkInfo->write_node_ = node;
-    blkInfo->last_node_ = node;
+
+    node->AddOutEdge(edge);
+    edges_.push_back(edge);
   }
 
   // for sync op
@@ -390,7 +412,6 @@ void Graph::Analysis() {
     int curIndex = curNode->id_;
 
     // step 2: release some blocks' data that won't be used later
-    size_t freed_mem = 0;
     free_blocks_[curIndex].clear();
     for (size_t i = 0; i < curNode->in_edges_.size(); ++i) {
       Edge *edge = curNode->in_edges_[i];
@@ -398,11 +419,27 @@ void Graph::Analysis() {
       BlkInfo *blkInfo = blocks_[blk];
 
       // if curnode is the last node accessing the block
-      if (blkInfo->last_node_ == curNode) {
+      if (blkInfo->used_nodes_.back() == curNode) {
         BlockType type = blkInfo->type_;
         // if the block belongs to a inter tensor
         // and isn't refered on the Python Side
         if ((type == BlockType::kInter) &&
+            blkInfo->graph_ref_ >= blk->ref_count()) {
+          free_blocks_[curIndex].push_back(blk);
+        }
+      }
+    }
+    for (size_t i = 0; i < curNode->out_edges_.size(); ++i) {
+      Edge *edge = curNode->out_edges_[i];
+      Block *blk = edge->blk_;
+      BlkInfo *blkInfo = blocks_[blk];
+
+      // if curnode is the last node accessing the block
+      if (blkInfo->used_nodes_.back() == curNode) {
+        BlockType type = blkInfo->type_;
+        // if the block belongs to a inter tensor
+        // and isn't refered on the Python Side
+        if ((type == BlockType::kEnd) &&
             blkInfo->graph_ref_ >= blk->ref_count()) {
           free_blocks_[curIndex].push_back(blk);
         }
@@ -460,22 +497,31 @@ void Graph::AddSyncOp(function<void(Context *)> &&op) {
   for (size_t i = 0; i < write_blocks_.size(); ++i) {
     Block *blk = write_blocks_[i];
     BlkInfo *blkInfo = blocks_[blk];
+    Edge *edge = nullptr;
 
     if (blkInfo->type_ == BlockType::kEnd) {
       blkInfo->type_ = BlockType::kInter;
     }
 
-    Node *write_node = blkInfo->write_node_;
-    Edge *edge = new Edge(edges_.size(), blk, write_node, node);
-    if (write_node) {
-      write_node->AddOutEdge(edge);
+    Edge *write_edge = blkInfo->write_edge_;
+    if (!write_edge->dst_node_) {
+      // change the dst node of the write_edge
+      write_edge->dst_node_ = node;
+      edge = write_edge;
+    } else {
+      Node *src_node = write_edge->src_node_;
+      edge = new Edge(edges_.size(), blk, src_node, node);
+      src_node->AddOutEdge(edge);
+      edges_.push_back(edge);
     }
 
-    // fake edges, no need to add the graph ref
-    blkInfo->last_node_ = node;
-    blkInfo->write_node_ = node;
-
     node->AddInEdge(edge);
+
+    // fake edges, no need to add the graph ref
+    edge = new Edge(edges_.size(), blk, node, nullptr);
+    blkInfo->write_edge_ = edge;
+
+    node->AddOutEdge(edge);
     edges_.push_back(edge);
   }
 

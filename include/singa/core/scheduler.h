@@ -101,17 +101,19 @@ class BlkInfo {
         blk_(blk),
         type_(type),
         graph_ref_(0),
-        write_node_(nullptr),
-        last_node_(nullptr) {}
+        write_edge_(nullptr),
+
+        write_node_(nullptr) {}
 
   // getters of BlkInfo
   int id() const { return id_; }
   Block *block() const { return blk_; }
   BlockType type() const { return type_; }
   int graph_ref() const { return graph_ref_; }
-  Node *first_node() const { return first_node_; }
+  Edge *write_edge() const { return write_edge_; }
   Node *write_node() const { return write_node_; }
-  Node *last_node() const { return last_node_; }
+  const NodeVec &used_nodes() const { return used_nodes_; }
+  Node *used_node(const size_t idx) const;
 
  private:
   friend Graph;
@@ -120,9 +122,9 @@ class BlkInfo {
   Block *blk_;
   BlockType type_;
   int graph_ref_;
-  Node *first_node_;  // first node that uses the block
-  Node *write_node_;  // last node that writes the block
-  Node *last_node_;   // last node that uses the block
+  Edge *write_edge_;    // the edge of last node to write data into blk
+  Node *write_node_;    // last node that writes the block
+  NodeVec used_nodes_;  // the nodes that uses the block
 };
 
 class Graph {
