@@ -19,6 +19,7 @@
 #include "singa/core/scheduler.h"
 
 #include <algorithm>
+#include <chrono>
 #include <functional>
 #include <iomanip>
 #include <sstream>
@@ -41,15 +42,21 @@ void Edge::SetSrcNode(Node *src_node) { src_node_ = src_node; }
 void Edge::SetDstNode(Node *dst_node) { dst_node_ = dst_node; }
 
 OpRec::OpRec() : time_(0) {
-  cudaEventCreate(&start_);
-  cudaEventCreate(&end_);
+  cudaEventCreateWithFlags(&start_, cudaEventBlockingSync);
+  cudaEventCreate(&end_, cudaEventBlockingSync);
 }
 
-Graph::Graph(Device *device) : device_(device) {
+Graph::Graph(Device *device)
+    : device_(device), thread_(&Graph::FreeLoop, this) {
   cudaStreamCreateWithFlags(&swap_, cudaStreamNonBlocking);
+  autoswap_ = device->id() != -1;
+  // autoswap_ = false;
 }
 
-Graph::~Graph() { Reset(); }
+Graph::~Graph() {
+  thread_.join();
+  Reset();
+}
 
 Node *Graph::node(const size_t idx) const {
   CHECK_LT(idx, nodes_.size());
@@ -103,7 +110,16 @@ void Graph::Reset() {
   }
   blocks_.clear();
 
+  for (auto it : host_blks_) {
+    delete it;
+  }
+  host_blks_.clear();
+
   write_blocks_.clear();
+
+  ResetPlan();
+
+  start_up_ = true;
 
   dirty_ = false;
 }
@@ -191,7 +207,8 @@ void Graph::Debug() {
   for (auto it : blkInfos) {
     auto blkInfo = it;
     ss << "Block[" << std::setw(w) << blkInfo->id_ << "] addr[" << std::setw(w)
-       << blkInfo->blk_ << "] graph_ref[" << std::setw(w) << blkInfo->graph_ref_
+       << blkInfo->blk_ << "] size[" << std::setw(9) << it->blk_->size()
+       << "] graph_ref[" << std::setw(w) << blkInfo->graph_ref_
        << "] ref_count[" << std::setw(w) << blkInfo->blk_->ref_count() << "] ";
     switch (blkInfo->type_) {
       case BlockType::kInput:
@@ -232,6 +249,8 @@ void Graph::Debug() {
 void Graph::RunGraph() {
   if (dirty_) Analysis();
 
+  Context *ctx = device_->context(0);
+
   SafeQueue<Node *> node_queue;
 
   // activate nodes
@@ -246,46 +265,65 @@ void Graph::RunGraph() {
     node_queue.Pop(curNode);
     int curIndex = curNode->id_;
 
-    // step 2: execute the operation
-    if (!initialized_) {
-      cudaEventRecord(node_recs_[curIndex].start_, NULL);
-    }
-    device_->DoExec(std::move(curNode->op_), 0);
-    if (!initialized_) {
-      cudaEventRecord(node_recs_[curIndex].end_, NULL);
+    if (autoswap_) {
+      // step 2: swap in blocks if autoswap is enabled
+      for (auto &it : swap_in_[curIndex]) {
+        // printf("swap in Block[%d] Op[%d] ", blocks_[it->device_blk_]->id_,
+        // curIndex);
+        SwapBlock(it, true);
+      }
+
+      // step 3: wait for the blocks used by curNode to swap in
+      for (auto &it : swap_wait_[curIndex]) {
+        // printf("wait Block[%d] OP[%d] \n", blocks_[it->device_blk_]->id_,
+        // curIndex);
+        CUDA_CHECK(cudaStreamWaitEvent(ctx->stream, it->in_rec_.end_, 0));
+      }
+
+      if (start_up_) {
+        // for getting the elasped time of curNode
+        CUDA_CHECK(cudaEventRecord(node_recs_[curIndex].start_, ctx->stream));
+      }
     }
 
-    // step 3: release some blocks' data that won't be used later
+    // step 4: execute the operation
+    device_->DoExec(std::move(curNode->op_), 0);
+
+    if (autoswap_) {
+      if (start_up_ || swap_out_[curIndex].size()) {
+        // record a event if some blocks have to swap out
+        CUDA_CHECK(cudaEventRecord(node_recs_[curIndex].end_, ctx->stream));
+        if (swap_out_[curIndex].size()) {
+          // printf("wait OP[%d] ", curIndex);
+        }
+      }
+
+      // step 5: swap out blocks if autoswap is enbaled
+      if (autoswap_) {
+        for (auto &it : swap_out_[curIndex]) {
+          // printf("swap out Block[%d] Op[%d] ", blocks_[it->device_blk_]->id_,
+          // curIndex);
+          SwapBlock(it, false);
+        }
+      }
+    }
+
+    // step 6: release some blocks' data that won't be used later
     for (auto it : free_blocks_[curIndex]) {
       it->free_data();
     }
 
-    /*
-    if (free_blocks_[curIndex].size()) {
-      CBData *cb_data = new CBData(this, curNode);
-      cudaStreamAddCallback(device_->ctx_.stream, Graph::Callback, (void
-    *)(cb_data), 0);
-    }
-    */
-
-    // step 4: activate the following nodes
+    // step 7: activate the following nodes
     for (auto it : next_nodes_[curIndex]) {
       node_queue.Push(it);
     }
   }
 
-  if (!initialized_) {
-    initialized_ = true;
-    size_t size = node_recs_.size();
-
-    if (size > 0) {
-      cudaEventSynchronize(node_recs_[size - 1].end_);
-    }
-
-    for (size_t i = 0; i < size; ++i) {
-      auto &rec = node_recs_[i];
-      cudaEventElapsedTime(&rec.time_, rec.start_, rec.end_);
-      // printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
+  if (start_up_) {
+    start_up_ = false;
+    if (autoswap_) {
+      RecordTime();
+      AutoSwap();
     }
   }
 }
@@ -297,39 +335,11 @@ void Graph::RunInSerial() {
     Node *curNode = nodes_[i];
 
     // step 1: execute the operation
-    if (!initialized_) {
-      cudaEventRecord(node_recs_[i].start_, NULL);
-    }
     device_->DoExec(std::move(curNode->op_), 0);
-    if (!initialized_) {
-      cudaEventRecord(node_recs_[i].end_, NULL);
-    }
 
     // step 2: release some blocks' data that won't be used later
     for (auto it : free_blocks_[i]) {
       it->free_data();
-    }
-
-    /*
-    // Wait for calculation to complete and then recyle the data
-    CBData *cb_data = new CBData(this, curNode);
-    CHECK(cudaStreamAddCallback(device_->ctx_.stream, Graph::Callback, (void
-    *)(cb_data), 0));
-    */
-  }
-
-  if (!initialized_) {
-    initialized_ = true;
-
-    size_t size = node_recs_.size();
-    if (size > 0) {
-      cudaEventSynchronize(node_recs_[size - 1].end_);
-    }
-
-    for (size_t i = 0; i < size; ++i) {
-      auto &rec = node_recs_[i];
-      cudaEventElapsedTime(&rec.time_, rec.start_, rec.end_);
-      // printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
     }
   }
 }
@@ -337,7 +347,7 @@ void Graph::RunInSerial() {
 void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
                          const BlockVec &write_blocks) {
   dirty_ = true;
-  initialized_ = false;
+  start_up_ = true;
 
   node_recs_.resize(nodes_.size() + 1);
 
@@ -350,6 +360,9 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
 
   // create new node
   Node *node = new Node(nodes_.size(), std::move(op));
+
+  // create a set to determine if there is a loop
+  std::unordered_set<Block *> circle;
 
   // create edges for read_blocks
   for (size_t i = 0; i < read_blocks.size(); ++i) {
@@ -375,6 +388,7 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
           write_edge->dst_node_ = node;
           node->AddInEdge(write_edge);
           blkInfo->graph_ref_ += 1;
+          circle.insert(blk);
           continue;
         } else {
           src_node = write_edge->src_node_;
@@ -389,6 +403,7 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
       src_node->AddOutEdge(edge);
     }
 
+    circle.insert(blk);
     node->AddInEdge(edge);
     edges_.push_back(edge);
   }
@@ -409,8 +424,11 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
       }
     }
 
+    if (circle.find(blk) == circle.end()) {
+      blkInfo->used_nodes_.push_back(node);
+    }
+
     Edge *edge = new Edge(edges_.size(), blk, node, nullptr);
-    blkInfo->used_nodes_.push_back(node);
     blkInfo->write_edge_ = edge;
     blkInfo->graph_ref_ += 1;
 
@@ -426,9 +444,7 @@ void Graph::AddOperation(OpFunc &&op, const BlockVec &read_blocks,
 }
 
 void Graph::Analysis() {
-  begin_nodes_.clear();
-  next_nodes_.resize(nodes_.size());
-  free_blocks_.resize(nodes_.size());
+  ResetPlan();
 
   // init node ref
   std::vector<int> node_ref_;
@@ -457,11 +473,16 @@ void Graph::Analysis() {
   }
 
   // run graph
+  int idx = 0;
+  std::vector<int> order;
+  std::vector<int> id2order(nodes_.size(), -1);
   while (node_queue.Size()) {
     // step 1: pop the first element, get the node corresponding to the index
     Node *curNode = nullptr;
     node_queue.Pop(curNode);
     int curIndex = curNode->id_;
+    order.push_back(curIndex);
+    id2order[curIndex] = idx++;
 
     // step 2: release some blocks' data that won't be used later
     free_blocks_[curIndex].clear();
@@ -515,25 +536,140 @@ void Graph::Analysis() {
     }
   }
 
+  // find candidate blocks for swapping
+  host_blks_.resize(blocks_.size(), nullptr);
+  for (auto &it : blocks_) {
+    auto blk = it.first;
+    auto blkInfo = it.second;
+    auto type = blkInfo->type_;
+    if (blk->size() >= threshold_ && blkInfo->used_nodes_.size() > 1 &&
+        blkInfo->graph_ref_ >= blk->ref_count() &&
+        (type == BlockType::kInter || type == BlockType::kEnd)) {
+      auto &used_nodes = blkInfo->used_nodes_;
+      for (size_t i = 1; i < used_nodes.size(); ++i) {
+        int absense =
+            id2order[used_nodes[i]->id_] - id2order[used_nodes[i - 1]->id_];
+
+        if (absense <= nodes_.size() * 0.775) continue;
+
+        // add candidate swap info
+        int swap_out = used_nodes[i - 1]->id_;
+        int swap_in = used_nodes[i]->id_;
+        int next = used_nodes[i]->id_;
+
+        int num = 150;
+        if (id2order[swap_out] + 1 <= id2order[swap_in] - num) {
+          swap_in = order[id2order[swap_in] - num];
+        } else {
+          swap_in = order[id2order[swap_out] + 1];
+        }
+
+        // printf("Swap Block[%d] size[%8ld] absense[%d] swap_out[%d]
+        // swap_in[%d] next[%d]\n",
+        //        blkInfo->id_, blk->size(), absense, swap_out, swap_in, next);
+
+        Block *host_blk = host_blks_[blkInfo->id_];
+
+        if (nullptr == host_blk) {
+          host_blk = defaultDevice->NewBlock(blk->size());
+          host_blk->mutable_data();
+          host_blks_[blkInfo->id_] = host_blk;
+        }
+
+        SwapInfo *swap_info =
+            new SwapInfo(next, swap_in, swap_out, host_blk, blk);
+        swap_infos_.push_back(swap_info);
+
+        swap_in_[swap_in].push_back(swap_info);
+        swap_out_[swap_out].push_back(swap_info);
+        swap_wait_[next].push_back(swap_info);
+      }
+    }
+  }
+
   dirty_ = false;
 
-  // Debug();
+  Debug();
 }
 
 void Graph::AutoSwap() {}
 
+void Graph::ResetPlan() {
+  begin_nodes_.clear();
+
+  next_nodes_.clear();
+  next_nodes_.resize(nodes_.size());
+
+  free_blocks_.clear();
+  free_blocks_.resize(nodes_.size());
+
+  swap_in_.clear();
+  swap_in_.resize(nodes_.size());
+
+  swap_out_.clear();
+  swap_out_.resize(nodes_.size());
+
+  swap_wait_.clear();
+  swap_wait_.resize(nodes_.size());
+
+  for (size_t i = 0; i < swap_infos_.size(); ++i) {
+    delete swap_infos_[i];
+  }
+  swap_infos_.clear();
+}
+
 void Graph::FreeLoop() {
-  int id = 0;
+  SwapInfo *swap_info = nullptr;
   for (;;) {
-    free_queue_.Pop(id);
-    if (id == -1) {
+    free_queue_.Pop(swap_info);
+    if (swap_info == nullptr) {
       break;
     } else {
-      for (auto it : free_blocks_[id]) {
-        it->free_data();
+      std::lock_guard<std::mutex> lck(swap_info->mtx_);
+      if (!swap_info->on_device_) {
+        swap_info->device_blk_->free_data();
+        // printf("free block[%d] ", blocks_[swap_info->device_blk_]->id_);
       }
     }
   }
+}
+
+void Graph::RecordTime() {
+  size_t size = node_recs_.size();
+
+  if (size > 0) {
+    CUDA_CHECK(cudaEventSynchronize(node_recs_[size - 1].end_));
+  }
+
+  float total_time = 0;
+  for (size_t i = 0; i < size; ++i) {
+    auto &rec = node_recs_[i];
+    CUDA_CHECK(cudaEventElapsedTime(&rec.time_, rec.start_, rec.end_));
+    // printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
+    total_time += rec.time_;
+  }
+  // printf("total_time[%f]\n", total_time);
+
+  float total_in_time = 0;
+  float total_out_time = 0;
+  for (size_t i = 0; i < swap_infos_.size(); ++i) {
+    auto &in_rec = swap_infos_[i]->in_rec_;
+    auto &out_rec = swap_infos_[i]->out_rec_;
+
+    CUDA_CHECK(cudaEventElapsedTime(&in_rec.time_, in_rec.start_, in_rec.end_));
+    CUDA_CHECK(
+        cudaEventElapsedTime(&out_rec.time_, out_rec.start_, out_rec.end_));
+
+    // int id = blocks_[swap_infos_[i]->device_blk_]->id_;
+    // printf("SwapIn: Block[%d] Time[%f]\n", id, in_rec.time_);
+    // printf("SwapOut: Block[%d] Time[%f]\n", id, out_rec.time_);
+
+    total_in_time += in_rec.time_;
+    total_out_time += out_rec.time_;
+  }
+
+  // printf("total_in_time[%f] total_out_time[%f]\n", total_in_time,
+  //        total_out_time);
 }
 
 void Graph::ReserveMem(size_t size) {
@@ -542,6 +678,51 @@ void Graph::ReserveMem(size_t size) {
   Block *tmp = device_->NewBlock(reserve_mem);
   tmp->mutable_data();
   device_->FreeBlock(tmp);
+}
+
+void Graph::SwapBlock(SwapInfo *swap_info, bool direct) {
+  Block *host_blk = swap_info->host_blk_;
+  Block *device_blk = swap_info->device_blk_;
+
+  // swap in the block if direct is true
+  if (direct) {
+    void *dst = nullptr;
+    const void *src = host_blk->data();
+    {
+      std::lock_guard<std::mutex> lck(swap_info->mtx_);
+      swap_info->on_device_ = true;
+      dst = device_blk->mutable_data();
+    }
+
+    if (start_up_) {  // to record the swapping time
+      CUDA_CHECK(cudaEventRecord(swap_info->in_rec_.start_, swap_));
+    }
+    CUDA_CHECK(cudaMemcpyAsync(dst, src, host_blk->size(),
+                               cudaMemcpyHostToDevice, swap_));
+    CUDA_CHECK(cudaEventRecord(swap_info->in_rec_.end_, swap_));
+  } else {
+    swap_info->on_device_ = false;
+    const void *src = device_blk->data();
+    void *dst = host_blk->mutable_data();
+
+    // wait the operation to complete before swapping the block out
+    CUDA_CHECK(
+        cudaStreamWaitEvent(swap_, node_recs_[swap_info->swap_out_].end_, 0));
+
+    // swap the block out of the device
+    if (start_up_) {
+      CUDA_CHECK(cudaEventRecord(swap_info->out_rec_.start_, swap_));
+    }
+    CUDA_CHECK(cudaMemcpyAsync(dst, src, device_blk->size(),
+                               cudaMemcpyDeviceToHost, swap_));
+    if (start_up_) {
+      CUDA_CHECK(cudaEventRecord(swap_info->out_rec_.end_, swap_));
+    }
+
+    // free data if the swapping is complete
+    CBData *cb_data = new CBData(this, swap_info);
+    cudaStreamAddCallback(swap_, Graph::Callback, (void *)(cb_data), 0);
+  }
 }
 
 void Graph::AddSyncOp(function<void(Context *)> &&op) {
@@ -583,14 +764,11 @@ void Graph::AddSyncOp(function<void(Context *)> &&op) {
   nodes_.push_back(node);
 }
 
-/*
 void CUDART_CB Graph::Callback(cudaStream_t stream, cudaError_t status,
                                void *data) {
-  CBData *cb_data = (CBData *)data;
-  Graph *graph = cb_data->graph_;
-  graph->free_queue_.Push(cb_data->node_->id_);
-  delete cb_data;
+  CBData *cbData = (CBData *)data;
+  cbData->graph_->free_queue_.Push(cbData->swap_info_);
+  delete cbData;
 }
-*/
 
 }  // namespace singa

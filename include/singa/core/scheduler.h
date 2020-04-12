@@ -19,6 +19,7 @@
 #ifndef SINGA_CORE_SCHEDULER_H_
 #define SINGA_CORE_SCHEDULER_H_
 
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -42,11 +43,13 @@ class OpRec;
 class Graph;
 class Device;
 class BlkInfo;
+class SwapInfo;
 
 typedef std::vector<OpRec> OpRecVec;
 typedef std::vector<Node *> NodeVec;
 typedef std::vector<Edge *> EdgeVec;
 typedef std::vector<Block *> BlockVec;
+typedef std::vector<SwapInfo *> SwapInfoVec;
 typedef std::function<void(Context *)> OpFunc;
 typedef std::unordered_map<Block *, BlkInfo *> Blk2InfoMap;
 
@@ -105,7 +108,6 @@ class BlkInfo {
         type_(type),
         graph_ref_(0),
         write_edge_(nullptr),
-
         write_node_(nullptr) {}
 
   // getters of BlkInfo
@@ -127,7 +129,7 @@ class BlkInfo {
   int graph_ref_;
   Edge *write_edge_;    // the edge of last node to write data into blk
   Node *write_node_;    // last node that writes the block
-  NodeVec used_nodes_;  // the nodes that uses the block
+  NodeVec used_nodes_;  // the nodes that use this block
 };
 
 class OpRec {
@@ -142,13 +144,44 @@ class OpRec {
   cudaEvent_t end_;
 };
 
+class SwapInfo {
+ public:
+  SwapInfo()
+      : next_(-1),
+        swap_in_(-1),
+        swap_out_(-1),
+        host_blk_(nullptr),
+        device_blk_(nullptr) {}
+  SwapInfo(int next, int swap_in, int swap_out, Block *host_blk,
+           Block *device_blk)
+      : next_(next),
+        swap_in_(swap_in),
+        swap_out_(swap_out),
+        host_blk_(host_blk),
+        device_blk_(device_blk) {}
+
+ private:
+  friend Graph;
+
+  bool on_device_ = true;
+  int next_;      // next node id
+  int swap_in_;   // swap in node id
+  int swap_out_;  // swap out node id
+  Block *host_blk_;
+  Block *device_blk_;
+  OpRec in_rec_;
+  OpRec out_rec_;
+  mutable std::mutex mtx_;
+};
+
 class Graph {
  public:
   struct CBData {
     Graph *graph_;
-    Node *node_;
+    SwapInfo *swap_info_;
 
-    CBData(Graph *graph, Node *node) : graph_(graph), node_(node) {}
+    CBData(Graph *graph, SwapInfo *swap_info)
+        : graph_(graph), swap_info_(swap_info) {}
   };
 
   ~Graph();
@@ -187,11 +220,14 @@ class Graph {
   void Analysis();
   void AutoSwap();
   void FreeLoop();
+  void ResetPlan();
+  void RecordTime();
   void ReserveMem(size_t size);
+  void SwapBlock(SwapInfo *swap_info, bool direct);
   void AddSyncOp(function<void(Context *)> &&op);
 
-  // static void CUDART_CB Callback(cudaStream_t stream, cudaError_t status,
-  //                                void *data);
+  static void CUDART_CB Callback(cudaStream_t stream, cudaError_t status,
+                                 void *data);
 
  private:
   Device *device_;
@@ -211,14 +247,20 @@ class Graph {
   std::vector<BlockVec> free_blocks_;
 
   // AutoSwap
-  bool initialized_ = false;
-  size_t threshold_ = 1048576;
+  bool autoswap_ = false;
+  bool start_up_ = true;
+  size_t threshold_ = 1048576;  // 1048576 = 1MB
   cudaStream_t swap_;
+  BlockVec host_blks_;
   OpRecVec node_recs_;
-  OpRecVec swap_recs_;
-  BlockVec candidates_;
+  SwapInfoVec swap_infos_;
+  std::vector<SwapInfoVec> swap_in_;
+  std::vector<SwapInfoVec> swap_out_;
+  std::vector<SwapInfoVec> swap_wait_;
 
-  SafeQueue<int> free_queue_;
+  // Free blocks in callback functions
+  std::thread thread_;
+  SafeQueue<SwapInfo *> free_queue_;
 };
 
 /// Scheduling Tensor operations with dependency detection.
