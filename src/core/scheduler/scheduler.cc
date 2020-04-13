@@ -22,6 +22,7 @@
 #include <chrono>
 #include <functional>
 #include <iomanip>
+#include <queue>
 #include <sstream>
 #include <thread>
 #include <unordered_set>
@@ -55,8 +56,8 @@ Graph::Graph(Device *device)
     : device_(device), thread_(&Graph::ThreadLoop, this) {
   CUDA_CHECK(cudaStreamCreateWithFlags(&in_stream_, cudaStreamNonBlocking));
   CUDA_CHECK(cudaStreamCreateWithFlags(&out_stream_, cudaStreamNonBlocking));
-  // autoswap_ = device->id() != -1;
-  autoswap_ = false;
+  autoswap_ = device->id() != -1;
+  // autoswap_ = false;
   thread_.detach();
 }
 
@@ -278,25 +279,26 @@ void Graph::RunGraph() {
       // step 2: swap in blocks if autoswap is enabled
       for (auto &it : swap_in_[curIndex]) {
         SwapBlock(it, true);
-        if (start_up_)
-          printf("swap in Block[%d] Op[%d] \n", blocks_[it->device_blk_]->id_,
-                 curIndex);
+        // if (start_up_)
+        //   printf("swap in Block[%d] Op[%d] \n",
+        //   blocks_[it->device_blk_]->id_,
+        //          curIndex);
       }
 
       // wait for the blocks which memory are freed to swap out
       for (auto &it : swap_free_[curIndex]) {
         it->device_blk_->free_data();
-        if (start_up_)
-          printf("free block[%d] Op[%d]\n", blocks_[it->device_blk_]->id_,
-                 curIndex);
+        // if (start_up_)
+        //   printf("free block[%d] Op[%d]\n", blocks_[it->device_blk_]->id_,
+        //          curIndex);
       }
 
       // step 3: wait for the blocks used by curNode to swap in
       for (auto &it : swap_wait_[curIndex]) {
         CUDA_CHECK(cudaStreamWaitEvent(ctx->stream, it->in_rec_.end_, 0));
-        if (start_up_)
-          printf("wait Block[%d] OP[%d] \n", blocks_[it->device_blk_]->id_,
-                 curIndex);
+        // if (start_up_)
+        //   printf("wait Block[%d] OP[%d] \n", blocks_[it->device_blk_]->id_,
+        //          curIndex);
       }
 
       if (start_up_) {
@@ -312,17 +314,18 @@ void Graph::RunGraph() {
       if (start_up_ || swap_out_[curIndex].size()) {
         // record a event if some blocks have to swap out
         CUDA_CHECK(cudaEventRecord(node_recs_[curIndex].end_, ctx->stream));
-        if (swap_out_[curIndex].size() && start_up_) {
-          printf("wait OP[%d] \n", curIndex);
-        }
+        // if (swap_out_[curIndex].size() && start_up_) {
+        //   printf("wait OP[%d] \n", curIndex);
+        // }
       }
 
       // step 5: swap out blocks if autoswap is enbaled
       for (auto &it : swap_out_[curIndex]) {
         SwapBlock(it, false);
-        if (start_up_)
-          printf("swap out Block[%d] Op[%d] \n", blocks_[it->device_blk_]->id_,
-                 curIndex);
+        // if (start_up_)
+        //   printf("swap out Block[%d] Op[%d] \n",
+        //   blocks_[it->device_blk_]->id_,
+        //          curIndex);
       }
     }
 
@@ -494,12 +497,6 @@ void Graph::Analysis() {
   int idx = 0;
   std::vector<int> order;
   std::vector<int> id2order(nodes_.size(), -1);
-  std::vector<bool> allocated(blocks_.size(), false);
-  std::vector<size_t> chart;
-
-  size_t peak_mem = device_->GetAllocatedMem();
-  size_t current_mem = peak_mem;
-
   while (node_queue.Size()) {
     // step 1: pop the first element, get the node corresponding to the index
     Node *curNode = nullptr;
@@ -509,17 +506,11 @@ void Graph::Analysis() {
     id2order[curIndex] = idx++;
 
     // step 2: release some blocks' data that won't be used later
-    size_t free_mem = 0;
     free_blocks_[curIndex].clear();
     for (size_t i = 0; i < curNode->in_edges_.size(); ++i) {
       Edge *edge = curNode->in_edges_[i];
       Block *blk = edge->blk_;
       BlkInfo *blkInfo = blocks_[blk];
-
-      if (!blk->initialized() && !allocated[blkInfo->id_]) {
-        allocated[blkInfo->id_] = true;
-        current_mem += blk->size();
-      }
 
       // if curnode is the last node accessing the block
       if (blkInfo->used_nodes_.back() == curNode) {
@@ -529,22 +520,14 @@ void Graph::Analysis() {
         if ((type == BlockType::kInter) &&
             blkInfo->graph_ref_ >= blk->ref_count()) {
           free_blocks_[curIndex].push_back(blk);
-          if (blk->initialized() || allocated[blkInfo->id_]) {
-            allocated[blkInfo->id_] = false;
-            free_mem += blk->size();
-          }
         }
       }
     }
+
     for (size_t i = 0; i < curNode->out_edges_.size(); ++i) {
       Edge *edge = curNode->out_edges_[i];
       Block *blk = edge->blk_;
       BlkInfo *blkInfo = blocks_[blk];
-
-      if (!blk->initialized() && !allocated[blkInfo->id_]) {
-        allocated[blkInfo->id_] = true;
-        current_mem += blk->size();
-      }
 
       // if curnode is the last node accessing the block
       if (blkInfo->used_nodes_.back() == curNode) {
@@ -554,16 +537,9 @@ void Graph::Analysis() {
         if ((type == BlockType::kEnd) &&
             blkInfo->graph_ref_ >= blk->ref_count()) {
           free_blocks_[curIndex].push_back(blk);
-          if (blk->initialized() || allocated[blkInfo->id_]) {
-            allocated[blkInfo->id_] = false;
-            free_mem += blk->size();
-          }
         }
       }
     }
-    peak_mem = std::max(peak_mem, current_mem);
-    chart.push_back(current_mem);
-    current_mem -= free_mem;
 
     // step 3: decrease ref count of nodes and activate nodes
     next_nodes_[curIndex].clear();
@@ -582,68 +558,48 @@ void Graph::Analysis() {
     }
   }
 
-  for (size_t i = 0; i < chart.size(); ++i) {
-    printf("order[%d] op[%d] mem[%ld]\n", i, order[i], chart[i]);
-  }
-
-  // find candidate blocks for swapping
-  host_blks_.resize(blocks_.size(), nullptr);
-  for (auto &it : blocks_) {
-    auto blk = it.first;
-    auto blkInfo = it.second;
-    auto type = blkInfo->type_;
-    if (blk->size() >= threshold_ && blkInfo->used_nodes_.size() > 1 &&
-        blkInfo->graph_ref_ >= blk->ref_count() &&
-        (type == BlockType::kInter || type == BlockType::kEnd)) {
+  if (autoswap_) {
+    // init auto swap to get elapsed time of ops and swapping
+    for (auto &it : blocks_) {
+      auto blk = it.first;
+      auto blkInfo = it.second;
+      auto type = blkInfo->type_;
       auto &used_nodes = blkInfo->used_nodes_;
-      for (size_t i = 1; i < used_nodes.size(); ++i) {
-        int absense =
-            id2order[used_nodes[i]->id_] - id2order[used_nodes[i - 1]->id_];
+      if (blk->size() >= threshold_ && used_nodes.size() > 1 &&
+          blkInfo->graph_ref_ >= blk->ref_count() &&
+          (type == BlockType::kInter || type == BlockType::kEnd)) {
+        size_t idx = 0;
+        int max_absense = 0;
+        for (size_t i = 1; i < used_nodes.size(); ++i) {
+          int from = id2order[used_nodes[i - 1]->id_];
+          int to = id2order[used_nodes[i]->id_];
+          int absense = to - from;
+          if (absense > max_absense) {
+            max_absense = absense;
+            idx = i - 1;
+          }
+        }
 
-        if (absense <= nodes_.size() * 0.2) continue;
+        if (max_absense <= 1) continue;
 
         // add candidate swap info
-        int swap_out = used_nodes[i - 1]->id_;
-        int swap_free = used_nodes[i - 1]->id_ + 1;
-        int swap_in = used_nodes[i]->id_;
-        int next = used_nodes[i]->id_;
+        int swap_out = used_nodes[idx]->id_;
+        int swap_free = order[id2order[swap_out] + 1];
+        int swap_in = used_nodes[idx + 1]->id_;
+        int next = used_nodes[idx + 1]->id_;
 
-        int num = absense * 0.15;
-        if (id2order[swap_out] + 1 <= id2order[swap_in] - num) {
-          swap_in = order[id2order[swap_in] - num];
-        } else {
-          swap_in = order[id2order[swap_out] + 1];
-        }
-        swap_free = order[id2order[swap_out] + 1];
+        // printf("swap Block[%d] out[%d] free[%d] in[%d] next[%d]\n",
+        //        blkInfo->id_, swap_out, swap_free, swap_in, next);
 
-        printf(
-            "Swap Block[%d] size[%8ld] absense[%d] swap_out[%d] swap_free[%d] "
-            "swap_in[% d] "
-            "next[% d]\n ",
-            blkInfo->id_, blk->size(), absense, swap_out, swap_free, swap_in,
-            next);
-
-        Block *host_blk = host_blks_[blkInfo->id_];
-
-        if (nullptr == host_blk) {
-          void *ptr = nullptr;
-          // CUDA_CHECK(cudaHostAlloc((void **)&ptr, blk->size(),
-          // cudaHostAllocMapped));
-          CUDA_CHECK(cudaMallocHost((void **)&ptr, blk->size()));
-          // ptr = malloc(blk->size());
-          host_blk = new Block(ptr, blk->size());
-          host_blks_[blkInfo->id_] = host_blk;
-        }
-
-        SwapInfo *swap_info =
-            new SwapInfo(next, swap_in, swap_out, host_blk, blk);
+        auto host_blk = host_blks_[blkInfo->id_];
+        auto swap_info = new SwapInfo(next, swap_in, swap_out, host_blk, blk);
         swap_infos_.push_back(swap_info);
 
         swap_out_[swap_out].push_back(swap_info);
         swap_free_[swap_free].push_back(swap_info);
+        swap_wait_[swap_free].push_back(swap_info);
         swap_in_[swap_in].push_back(swap_info);
         swap_wait_[next].push_back(swap_info);
-        swap_wait_[swap_free].push_back(swap_info);
       }
     }
   }
@@ -653,7 +609,86 @@ void Graph::Analysis() {
   // Debug();
 }
 
-void Graph::AutoSwap() {}
+void Graph::AutoSwap() {
+  std::vector<int> ids;
+  std::vector<int> id2order;
+
+  ids.resize(begin_nodes_.size());
+  id2order.resize(nodes_.size());
+  for (size_t i = 0; i < begin_nodes_.size(); ++i) {
+    ids[i] = begin_nodes_[i]->id_;
+  }
+
+  std::vector<size_t> chart;
+  std::vector<bool> allocated(blocks_.size(), false);
+  size_t peak_mem = device_->GetAllocatedMem();
+  size_t current_mem = peak_mem;
+  size_t idx = -1;
+  for (size_t i = 0; i < ids.size(); ++i) {
+    int curIndex = ids[i];
+    Node *curNode = nodes_[curIndex];
+
+    id2order[curIndex] = i;
+    for (auto &it : next_nodes_[curIndex]) {
+      ids.push_back(it->id_);
+    }
+
+    for (auto &it : curNode->in_edges_) {
+      Block *blk = it->blk_;
+      BlkInfo *blkInfo = blocks_[blk];
+      if (!blk->initialized() && !allocated[blkInfo->id_]) {
+        allocated[blkInfo->id_] = true;
+        current_mem += blk->size();
+      }
+    }
+
+    for (auto &it : curNode->out_edges_) {
+      Block *blk = it->blk_;
+      BlkInfo *blkInfo = blocks_[blk];
+      if (!blk->initialized() && !allocated[blkInfo->id_]) {
+        allocated[blkInfo->id_] = true;
+        current_mem += blk->size();
+      }
+    }
+
+    size_t free_mem = 0;
+    for (auto &it : free_blocks_[curIndex]) {
+      BlkInfo *blkInfo = blocks_[it];
+      if (it->initialized() || allocated[blkInfo->id_]) {
+        allocated[blkInfo->id_] = false;
+        free_mem += it->size();
+      }
+    }
+
+    if (current_mem > peak_mem) {
+      peak_mem = current_mem;
+      idx = i;
+    }
+    chart.push_back(current_mem);
+    current_mem -= free_mem;
+  }
+
+  // get time
+  std::vector<float> node_time;
+  node_time.resize(nodes_.size());
+  node_time[0] = node_recs_[ids[0]].time_;
+  for (size_t i = 1; i < ids.size(); ++i) {
+    node_time[i] += node_time[i - 1] + node_recs_[ids[i]].time_;
+  }
+  for (size_t i = 0; i < chart.size(); ++i) {
+    printf("No[%4ld] OP[%4d] Mem[%10ld] Cumulative Time[%f]\n", i, ids[i],
+           chart[i], node_time[i]);
+  }
+
+  printf("idx[%ld] peak_mem[%ld]\n", idx, peak_mem);
+
+  // find best blocks
+  auto comp = [](const SwapItem &left, const SwapItem &right) {
+    return left.second > right.second;
+  };
+  std::priority_queue<SwapItem, std::vector<SwapItem>, decltype(comp)>
+      candidate(comp);
+}
 
 void Graph::ResetPlan() {
   begin_nodes_.clear();
@@ -680,6 +715,21 @@ void Graph::ResetPlan() {
     delete swap_infos_[i];
   }
   swap_infos_.clear();
+
+  host_blks_.resize(blocks_.size(), nullptr);
+  for (auto it : blocks_) {
+    Block *blk = it.first;
+    BlkInfo *blkInfo = it.second;
+    Block *host_blk = host_blks_[blkInfo->id_];
+    if (!host_blk) {
+      void *ptr = nullptr;
+      // CUDA_CHECK(cudaHostAlloc((void **)&ptr, blk->size(),
+      // ptr = malloc(blk->size());
+      CUDA_CHECK(cudaMallocHost((void **)&ptr, blk->size()));
+      host_blk = new Block(ptr, blk->size());
+      host_blks_[blkInfo->id_] = host_blk;
+    }
+  }
 }
 
 void Graph::RecordTime() {
@@ -693,10 +743,10 @@ void Graph::RecordTime() {
   for (size_t i = 0; i < size; ++i) {
     auto &rec = node_recs_[i];
     CUDA_CHECK(cudaEventElapsedTime(&rec.time_, rec.start_, rec.end_));
-    printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
+    // printf("OP[%ld] elapsedTime[%f]\n", i, rec.time_);
     total_time += rec.time_;
   }
-  printf("total_time[%f]\n", total_time);
+  // printf("total_time[%f]\n", total_time);
 
   float total_in_time = 0;
   float total_out_time = 0;
@@ -708,19 +758,19 @@ void Graph::RecordTime() {
     CUDA_CHECK(
         cudaEventElapsedTime(&out_rec.time_, out_rec.start_, out_rec.end_));
 
-    Block *blk = swap_infos_[i]->device_blk_;
-    int id = blocks_[blk]->id_;
-    printf("SwapIn: Block[%d] Size[%ld] Time[%f]\n", id, blk->size(),
-           in_rec.time_);
-    printf("SwapOut: Block[%d] Size[%ld] Time[%f]\n", id, blk->size(),
-           out_rec.time_);
+    // Block *blk = swap_infos_[i]->device_blk_;
+    // int id = blocks_[blk]->id_;
+    // printf("SwapIn: Block[%d] Size[%ld] Time[%f]\n", id, blk->size(),
+    //        in_rec.time_);
+    // printf("SwapOut: Block[%d] Size[%ld] Time[%f]\n", id, blk->size(),
+    //        out_rec.time_);
 
     total_in_time += in_rec.time_;
     total_out_time += out_rec.time_;
   }
 
-  printf("total_in_time[%f] total_out_time[%f]\n", total_in_time,
-         total_out_time);
+  // printf("total_in_time[%f] total_out_time[%f]\n", total_in_time,
+  //        total_out_time);
 }
 
 void Graph::ThreadLoop() {
@@ -733,7 +783,7 @@ void Graph::ThreadLoop() {
         std::lock_guard<std::mutex> lck(swap_info->mtx_);
         if (!swap_info->on_device_) {
           swap_info->device_blk_->free_data();
-          printf("free block[%d] ", blocks_[swap_info->device_blk_]->id_);
+          // printf("free block[%d] ", blocks_[swap_info->device_blk_]->id_);
         }
       }
     }

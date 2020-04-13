@@ -50,6 +50,7 @@ typedef std::vector<Node *> NodeVec;
 typedef std::vector<Edge *> EdgeVec;
 typedef std::vector<Block *> BlockVec;
 typedef std::vector<SwapInfo *> SwapInfoVec;
+typedef std::pair<SwapInfo *, float> SwapItem;
 typedef std::function<void(Context *)> OpFunc;
 typedef std::unordered_map<Block *, BlkInfo *> Blk2InfoMap;
 
