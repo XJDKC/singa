@@ -62,11 +62,12 @@ CudaGPU::CudaGPU(int id, std::shared_ptr<DeviceMemPool> pool)
 
 void CudaGPU::Setup() {
   lang_ = kCuda;
-  ctx_.stream = NULL;  // use the default sync stream
+  // ctx_.stream = NULL;  // use the default sync stream
 
   // TODO(wangwei) create one handle for each steam?
   // Preserse for future use instead of default sync stream, for concurrency
   // cudaStreamCreate(&ctx_.stream);
+  cudaStreamCreateWithFlags(&ctx_.stream, cudaStreamNonBlocking);
 
   CUDA_CHECK(cudaSetDevice(id_));
   // use curandCreateGeneratorHost for CudaHost device

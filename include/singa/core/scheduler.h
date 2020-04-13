@@ -135,6 +135,7 @@ class BlkInfo {
 class OpRec {
  public:
   OpRec();
+  ~OpRec();
 
  private:
   friend Graph;
@@ -219,9 +220,9 @@ class Graph {
  private:
   void Analysis();
   void AutoSwap();
-  void FreeLoop();
   void ResetPlan();
   void RecordTime();
+  void ThreadLoop();
   void ReserveMem(size_t size);
   void SwapBlock(SwapInfo *swap_info, bool direct);
   void AddSyncOp(function<void(Context *)> &&op);
@@ -250,12 +251,14 @@ class Graph {
   bool autoswap_ = false;
   bool start_up_ = true;
   size_t threshold_ = 1048576;  // 1048576 = 1MB
-  cudaStream_t swap_;
+  cudaStream_t in_stream_;
+  cudaStream_t out_stream_;
   BlockVec host_blks_;
   OpRecVec node_recs_;
   SwapInfoVec swap_infos_;
   std::vector<SwapInfoVec> swap_in_;
   std::vector<SwapInfoVec> swap_out_;
+  std::vector<SwapInfoVec> swap_free_;
   std::vector<SwapInfoVec> swap_wait_;
 
   // Free blocks in callback functions
