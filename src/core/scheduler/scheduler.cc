@@ -276,6 +276,16 @@ void Graph::RunGraph() {
     int curIndex = curNode->id_;
 
     if (autoswap_) {
+      // wait for the blocks which memory are freed to swap out
+      for (auto &it : swap_free_[curIndex]) {
+        it->device_blk_->free_data();
+        CUDA_CHECK(cudaStreamWaitEvent(ctx->stream, it->out_rec_.end_, 0));
+        CUDA_CHECK(cudaStreamWaitEvent(in_stream_, it->out_rec_.end_, 0));
+        // if (start_up_)
+        //   printf("free block[%d] Op[%d]\n", blocks_[it->device_blk_]->id_,
+        //          curIndex);
+      }
+
       // step 2: swap in blocks if autoswap is enabled
       for (auto &it : swap_in_[curIndex]) {
         SwapBlock(it, true);
@@ -285,16 +295,9 @@ void Graph::RunGraph() {
         //          curIndex);
       }
 
-      // wait for the blocks which memory are freed to swap out
-      for (auto &it : swap_free_[curIndex]) {
-        it->device_blk_->free_data();
-        // if (start_up_)
-        //   printf("free block[%d] Op[%d]\n", blocks_[it->device_blk_]->id_,
-        //          curIndex);
-      }
-
       // step 3: wait for the blocks used by curNode to swap in
       for (auto &it : swap_wait_[curIndex]) {
+        CUDA_CHECK(cudaStreamWaitEvent(ctx->stream, it->out_rec_.end_, 0));
         CUDA_CHECK(cudaStreamWaitEvent(ctx->stream, it->in_rec_.end_, 0));
         // if (start_up_)
         //   printf("wait Block[%d] OP[%d] \n", blocks_[it->device_blk_]->id_,
@@ -344,7 +347,7 @@ void Graph::RunGraph() {
     start_up_ = false;
     if (autoswap_) {
       RecordTime();
-      AutoSwap();
+      // AutoSwap();
     }
   }
 }
@@ -597,7 +600,6 @@ void Graph::Analysis() {
 
         swap_out_[swap_out].push_back(swap_info);
         swap_free_[swap_free].push_back(swap_info);
-        swap_wait_[swap_free].push_back(swap_info);
         swap_in_[swap_in].push_back(swap_info);
         swap_wait_[next].push_back(swap_info);
       }
