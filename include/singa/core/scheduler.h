@@ -149,16 +149,18 @@ class OpRec {
 class SwapInfo {
  public:
   SwapInfo()
-      : next_(-1),
+      : swap_out_(-1),
+        swap_free_(-1),
         swap_in_(-1),
-        swap_out_(-1),
+        swap_next_(-1),
         host_blk_(nullptr),
         device_blk_(nullptr) {}
-  SwapInfo(int next, int swap_in, int swap_out, Block *host_blk,
-           Block *device_blk)
-      : next_(next),
+  SwapInfo(int swap_out, int swap_free, int swap_in, int swap_next,
+           Block *host_blk, Block *device_blk)
+      : swap_out_(swap_out),
+        swap_free_(swap_free),
         swap_in_(swap_in),
-        swap_out_(swap_out),
+        swap_next_(swap_next),
         host_blk_(host_blk),
         device_blk_(device_blk) {}
 
@@ -166,9 +168,10 @@ class SwapInfo {
   friend Graph;
 
   bool on_device_ = true;
-  int next_;      // next node id
-  int swap_in_;   // swap in node id
-  int swap_out_;  // swap out node id
+  int swap_out_;   // swap out node id
+  int swap_free_;  // the node id when releasing the block
+  int swap_in_;    // swap in node id
+  int swap_next_;  // next node id
   Block *host_blk_;
   Block *device_blk_;
   OpRec in_rec_;
@@ -261,6 +264,9 @@ class Graph {
   std::vector<SwapInfoVec> swap_out_;
   std::vector<SwapInfoVec> swap_free_;
   std::vector<SwapInfoVec> swap_wait_;
+
+  std::vector<int> ids_;
+  std::vector<int> id2order_;
 
   // Free blocks in callback functions
   std::thread thread_;
