@@ -30,30 +30,13 @@ class MLP(module.Module):
         self.num_classes = num_classes
         self.dimension = 2
 
-        self.w0 = Tensor(shape=(data_size, perceptron_size),
-                         requires_grad=True,
-                         stores_grad=True)
-        self.w0.gaussian(0.0, 0.1)
-        self.b0 = Tensor(shape=(perceptron_size,),
-                         requires_grad=True,
-                         stores_grad=True)
-        self.b0.set_value(0.0)
-
-        self.w1 = Tensor(shape=(perceptron_size, num_classes),
-                         requires_grad=True,
-                         stores_grad=True)
-        self.w1.gaussian(0.0, 0.1)
-        self.b1 = Tensor(shape=(num_classes,),
-                         requires_grad=True,
-                         stores_grad=True)
-        self.b1.set_value(0.0)
+        self.linear1 = autograd.Linear(data_size, perceptron_size)
+        self.linear2 = autograd.Linear(perceptron_size, num_classes)
 
     def forward(self, inputs):
-        x = autograd.matmul(inputs, self.w0)
-        x = autograd.add_bias(x, self.b0)
+        x = self.linear1(inputs)
         x = autograd.relu(x)
-        x = autograd.matmul(x, self.w1)
-        x = autograd.add_bias(x, self.b1)
+        x = self.linear2(x)
         return x
 
     def loss(self, out, ty):
