@@ -53,6 +53,7 @@ class Device {
   void RunGraph(bool serial = false);
   bool graph_enabled() const;
   void EnableGraph(bool enable);
+  void EnableAutoSwap(bool enable);
   static void EnableLazyAlloc(bool enbale);
 };
 

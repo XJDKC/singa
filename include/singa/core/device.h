@@ -65,6 +65,8 @@ class Device {
 
   void EnableGraph(bool enable) { graph_enabled_ = enable; }
 
+  void EnableAutoSwap(bool enable) { graph_->EnableAutoSwap(enable); }
+
   static void EnableLazyAlloc(bool enbale) { lazy_alloc_ = enbale; }
 
   /// Called by Tensor.

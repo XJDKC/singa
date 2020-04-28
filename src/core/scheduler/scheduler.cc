@@ -103,6 +103,14 @@ const BlockVec &Graph::free_blocks(const size_t idx) const {
   return free_blocks_[idx];
 }
 
+void Graph::EnableAutoSwap(bool enable) {
+  if (device_->id() == -1) {
+    autoswap_ = false;
+    return;
+  }
+  autoswap_ = enable;
+}
+
 void Graph::Reset() {
   for (auto it : nodes_) {
     delete it;

@@ -196,6 +196,7 @@ class Graph {
   void Debug();
   void RunGraph();
   void RunInSerial();
+  void EnableAutoSwap(bool enabled = true);
   void AddOperation(OpFunc &&op, const BlockVec &read_blocks,
                     const BlockVec &write_blocks);
 
