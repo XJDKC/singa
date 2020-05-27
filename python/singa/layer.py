@@ -31,7 +31,10 @@ class LayerMeta(type):
 
         @wraps(func)
         def wrapper(self, *args, **kwargs):
-            if (args[0], list):
+            if len(args) == 0:
+                return
+
+            if isinstance(args[0], list):
                 assert len(args) > 0 and isinstance(args[0][0], Tensor), (
                     'initialize function expects PlaceHolders or Tensors')
                 dev = args[0][0].device
@@ -39,6 +42,7 @@ class LayerMeta(type):
                 assert len(args) > 0 and isinstance(args[0], Tensor), (
                     'initialize function expects PlaceHolders or Tensors')
                 dev = args[0].device
+
             prev_state = dev.graph_enabled()
             dev.EnableGraph(False)
             func(self, *args, **kwargs)
@@ -57,6 +61,7 @@ class LayerMeta(type):
 class Layer(object, metaclass=LayerMeta):
 
     sep = '.'
+
     def __init__(self):
         self._name = self.__class__.__name__
         self._unique_name = None
@@ -65,7 +70,6 @@ class Layer(object, metaclass=LayerMeta):
         self._layers = dict()
         self.param_names = []
         self.state_names = []
-        pass
 
     def initialize(self, *input):
         pass
@@ -212,7 +216,6 @@ class Linear(Layer):
     def __init__(self, out_features, *args, bias=True, **kwargs):
         """
         Args:
-            in_channels: int, the channel of input
             out_channels: int, the channel of output, also is the number of
                 filters
             bias: bool
@@ -256,6 +259,7 @@ class Linear(Layer):
             self.device_check(x, self.W, self.b)
         else:
             self.device_check(x, self.W)
+
         assert x.shape[1] == self.W.shape[0], (
             "Linear layer expects input features size %d received %d" %
             (self.W.shape[0], x.shape[1]))
@@ -265,6 +269,82 @@ class Linear(Layer):
             y = autograd.add_bias(y, self.b, axis=0)
         return y
 
+class Gemm(Layer):
+    """
+    Generate a Gemm operator
+    Y = alpha * A' * B' + beta * C
+    B is weight, C is bias
+    """
+
+    def __init__(self, out_features, alpha=1.0, beta=1.0, transA=False, transB=True, bias=True):
+        """
+        Args:
+            out_channels: int, the channel of output, also is the number of
+                filters
+            alpha (float): Scalar multiplier for the product of input tensors A * B.
+            beta (float): Scalar multiplier for input tensor C.
+            ransA (bool): Whether A should be transposed
+            transB (bool): Whether B should be transposed
+            bias: bool
+        """
+        super(Gemm, self).__init__()
+        self.out_features = out_features
+        self.alpha = alpha
+        self.beta = beta
+        self.transA = 1 if transA else 0
+        self.transB = 1 if transB else 0
+        self.bias = bias
+        
+        if self.bias:
+            self.param_names = ['W', 'b']
+        else:
+            self.param_names = ['W']
+        self.state_names = self.param_names
+
+    def initialize(self, x):
+        if self.transA == 0:
+            self.in_features = x.shape[1]
+        else:
+            self.in_features = x.shape[0]
+
+        if self.transB == 0:
+            w_shape = (self.in_features, self.out_features)
+        else:
+            w_shape = (self.out_features, self.in_features)
+        b_shape = (1, self.out_features)
+
+        self.W = Tensor(shape=w_shape, requires_grad=True, stores_grad=True, device=x.device)
+        std = math.sqrt(2.0 / (self.in_features + self.out_features))
+        self.W.gaussian(0.0, std)
+
+        if self.bias:
+            self.b = Tensor(shape=b_shape, requires_grad=True, stores_grad=True, device=x.device)
+            self.b.set_value(0.0)
+        else:
+            self.b = None
+
+    def forward(self, x):
+        if self.b:
+            self.device_check(x, self.W, self.b)
+        else:
+            self.device_check(x, self.W)
+
+        if self.transA == 0:
+            in_features = x.shape[1]
+        else:
+            in_features = x.shape[0]
+
+        if self.transB == 0:
+            in_features_w =  self.W.shape[0]
+        else:
+            in_features_w =  self.W.shape[1]
+
+        assert in_features == in_features_w, (
+            "Gemm layer expects input features size %d received %d" %
+            (in_features_w, in_features))
+        y = autograd.gemm(x, self.W, self.b, self.alpha, self.beta, self.transA, self.transB)
+
+        return y
 
 class Conv2d(Layer):
     """
@@ -272,7 +352,7 @@ class Conv2d(Layer):
     """
 
     def __init__(self,
-                 out_channels,
+                 nb_kernels,
                  kernel_size,
                  *args,
                  stride=1,
@@ -284,8 +364,7 @@ class Conv2d(Layer):
                  **kwargs):
         """
         Args:
-            in_channels (int): the channel of input
-            out_channels (int): the channel of output, also is the number of filters
+            nb_kernels (int): the channel of output, also is the number of filters
             kernel_size (int or tuple): kernel size for two direction of each
                 axis. For example, (2, 3), the first 2 means will add 2 at the
                 beginning and also 2 at the end for its axis.and if a int is
@@ -309,16 +388,14 @@ class Conv2d(Layer):
         # the old code create the layer like: Conv2d(8, 16, 3)， or Conv2d(8, 16, 3, stride=1)
         # the following code block is for backward compatibility
         if len(args) > 0:
-            self.in_channels = out_channels
-            self.out_channel = kernel_size
-            self.kernel_size = args[0]
+            nb_kernels = kernel_size
+            kernel_size = args[0]
         if len(args) > 1:
-            self.stride = args[1]
+            stride = args[1]
         if len(args) > 2:
-            self.padding = args[2]
+            padding = args[2]
 
-        self.out_channels = out_channels
-
+        self.nb_kernels = nb_kernels
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
@@ -327,9 +404,8 @@ class Conv2d(Layer):
         self.bias = bias
         self.pad_mode = pad_mode
 
-        assert (self.out_channels >= self.group and
-                self.out_channels % self.group
-                == 0), "out_channels and group dismatched."
+        assert (self.nb_kernels >= self.group and self.nb_kernels %
+                self.group == 0), "nb_kernels and group dismatched."
 
         if isinstance(kernel_size, int):
             self.kernel_size = (kernel_size, kernel_size)
@@ -380,22 +456,14 @@ class Conv2d(Layer):
             else:
                 self.inner_params[kwarg] = kwargs[kwarg]
 
-        if self.bias:
-            self.param_names = ['W', 'b']
-        else:
-            self.param_names = ['W']
-        self.state_names = self.param_names
-
-        self.pad_mode = pad_mode
-
     def initialize(self, x):
         self.in_channels = x.shape[1]
 
-        assert (self.group >= 1 and self.in_channels % self.group
-                == 0), "please set reasonable group."
+        assert (self.group >= 1 and self.in_channels %
+                self.group == 0), "please set reasonable group."
 
         w_shape = (
-            self.out_channels,
+            self.nb_kernels,
             int(self.in_channels / self.group),
             self.kernel_size[0],
             self.kernel_size[1],
@@ -404,14 +472,14 @@ class Conv2d(Layer):
         self.W = Tensor(shape=w_shape, requires_grad=True, stores_grad=True)
         # std = math.sqrt(
         # 2.0 / (self.in_channels * self.kernel_size[0] * self.kernel_size[1] +
-        # self.out_channels))
+        # self.nb_kernels))
         std = math.sqrt(
             2.0 / (w_shape[1] * self.kernel_size[0] * self.kernel_size[1] +
-                   self.out_channels))
+                   self.nb_kernels))
         self.W.gaussian(0.0, std)
 
         if self.bias:
-            b_shape = (self.out_channels,)
+            b_shape = (self.nb_kernels,)
             self.b = Tensor(shape=b_shape, requires_grad=True, stores_grad=True)
             self.b.set_value(0.0)
         else:
@@ -419,19 +487,14 @@ class Conv2d(Layer):
             self.b = None
             # Tensor(data=CTensor([]), requires_grad=False, stores_grad=False)
 
-    def forward(self, x):
-        if self.in_channels:
-            assert x.shape[1] == self.in_channels, "in_channels mismatched"
-
         # if same pad mode, re-compute the padding
         if self.pad_mode in ("SAME_UPPER", "SAME_LOWER"):
             self.padding, self.odd_padding = utils.get_padding_shape(
                 self.pad_mode, x.shape[2:], self.kernel_size, self.stride)
 
-        if self.bias:
-            self.device_check(x, self.W, self.b)
-        else:
-            self.device_check(x, self.W)
+        if self.odd_padding != (0, 0, 0, 0):
+            x = x.clone()
+            x.data = utils.handle_odd_pad_fwd(x.data, self.odd_padding)
 
         if x.device.id() == -1:
             if self.group != 1:
@@ -445,7 +508,7 @@ class Conv2d(Layer):
                         self.stride,
                         self.padding,
                         self.in_channels,
-                        self.out_channels,
+                        self.nb_kernels,
                         self.bias,
                         self.group,
                     )
@@ -458,11 +521,12 @@ class Conv2d(Layer):
                     self.stride,
                     self.padding,
                     self.in_channels,
-                    self.out_channels,
+                    self.nb_kernels,
                     self.bias,
                     self.group,
                 )
 
+    def forward(self, x):
         y = autograd.conv2d(self.handle, x, self.W, self.b, self.odd_padding)
         return y
 
@@ -474,17 +538,16 @@ class SeparableConv2d(Layer):
 
     def __init__(
         self,
-        in_channels,
-        out_channels,
+        nb_kernels,
         kernel_size,
+        *args,
         stride=1,
         padding=0,
         bias=False,
     ):
         """
         Args:
-            in_channels (int): the channel of input
-            out_channels (int): the channel of output, also is the number of filters
+            nb_kernels (int): the channel of output, also is the number of filters
             kernel_size (int or tuple): kernel size for two direction of each
                 axis. For example, (2, 3), the first 2 means will add 2 at the
                 beginning and also 2 at the end for its axis.and if a int is
@@ -498,17 +561,35 @@ class SeparableConv2d(Layer):
         """
         super(SeparableConv2d, self).__init__()
 
+        # the following code block is for backward compatibility
+        if len(args) > 0:
+            nb_kernels = kernel_size
+            kernel_size = args[0]
+        if len(args) > 1:
+            stride = args[1]
+        if len(args) > 2:
+            padding = args[2]
+
+        self.nb_kernels = nb_kernels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.bias = bias
+
+    def initialize(self, x):
+        self.in_channels = x.shape[1]
         self.depthwise_conv = Conv2d(
-            in_channels,
-            in_channels,
-            kernel_size,
-            stride,
-            padding,
-            group=in_channels,
-            bias=bias,
+            self.in_channels,
+            self.kernel_size,
+            stride=self.stride,
+            padding=self.padding,
+            group=self.in_channels,
+            bias=self.bias,
         )
 
-        self.point_conv = Conv2d(in_channels, out_channels, 1, bias=bias)
+        self.point_conv = Conv2d(self.nb_kernels,
+                                 1,
+                                 bias=self.bias)
 
     def forward(self, x):
         y = self.depthwise_conv(x)
@@ -559,6 +640,12 @@ class BatchNorm2d(Layer):
                                   stores_grad=False)
         self.running_var.set_value(1.0)
 
+        if not hasattr(self, "handle"):
+            if x.device.id() == -1:
+                self.handle = singa.BatchNormHandle(self.momentum, x.data)
+            else:
+                self.handle = singa.CudnnBatchNormHandle(self.momentum, x.data)
+
     def forward(self, x):
         assert x.shape[1] == self.channels, (
             "number of channels dismatched. %d vs %d" %
@@ -566,17 +653,6 @@ class BatchNorm2d(Layer):
 
         self.device_check(x, self.scale, self.bias, self.running_mean,
                           self.running_var)
-
-        if x.device.id() == -1:
-            if not hasattr(self, "handle"):
-                self.handle = singa.BatchNormHandle(self.momentum, x.data)
-            elif x.shape[0] != self.handle.batchsize:
-                self.handle = singa.BatchNormHandle(self.momentum, x.data)
-        else:
-            if not hasattr(self, "handle"):
-                self.handle = singa.CudnnBatchNormHandle(self.momentum, x.data)
-            elif x.shape[0] != self.handle.batchsize:
-                self.handle = singa.CudnnBatchNormHandle(self.momentum, x.data)
 
         y = autograd.batchnorm_2d(
             self.handle,
@@ -662,7 +738,7 @@ class Pooling2d(Layer):
         self.is_max = is_max
         self.pad_mode = pad_mode
 
-    def forward(self, x):
+    def initialize(self, x):
         # if same pad mode, re-compute the padding
         if self.pad_mode in ("SAME_UPPER", "SAME_LOWER"):
             self.padding, self.odd_padding = utils.get_padding_shape(
@@ -674,45 +750,25 @@ class Pooling2d(Layer):
         out_shape_w = (int(
             (x.shape[3] + 2 * self.padding[1] - self.kernel_size[1]) //
             self.stride[1]) + 1)
-        if x.device.id() == -1:
-            if not hasattr(self, "handle"):
-                self.handle = singa.PoolingHandle(
-                    x.data,
-                    self.kernel_size,
-                    self.stride,
-                    self.padding,
-                    self.is_max,
-                )
-            elif (x.shape[0] != self.handle.batchsize or
-                  out_shape_h != self.handle.pooled_height or
-                  out_shape_w != self.handle.pooled_width):
-                self.handle = singa.PoolingHandle(
-                    x.data,
-                    self.kernel_size,
-                    self.stride,
-                    self.padding,
-                    self.is_max,
-                )
-        else:
-            if not hasattr(self, "handle"):
-                self.handle = singa.CudnnPoolingHandle(
-                    x.data,
-                    self.kernel_size,
-                    self.stride,
-                    self.padding,
-                    self.is_max,
-                )
-            elif (x.shape[0] != self.handle.batchsize or
-                  out_shape_h != self.handle.pooled_height or
-                  out_shape_w != self.handle.pooled_width):
-                self.handle = singa.CudnnPoolingHandle(
-                    x.data,
-                    self.kernel_size,
-                    self.stride,
-                    self.padding,
-                    self.is_max,
-                )
 
+        if x.device.id() == -1:
+            self.handle = singa.PoolingHandle(
+                x.data,
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                self.is_max,
+            )
+        else:
+            self.handle = singa.CudnnPoolingHandle(
+                x.data,
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                self.is_max,
+            )
+
+    def forward(self, x):
         y = autograd.pooling_2d(self.handle, x, self.odd_padding)
         return y
 
@@ -726,7 +782,7 @@ class MaxPool2d(Pooling2d):
                  kernel_size,
                  stride=None,
                  padding=0,
-                 odd_padding=(0, 0, 0, 0)):
+                 pad_mode="NOTSET"):
         """
         Args:
             kernel_size (int or tuple): kernel size for two direction of each
@@ -738,13 +794,14 @@ class MaxPool2d(Pooling2d):
                 as kernel size. However, if you set pad_mode as "SAME_UPPER" or
                 "SAME_LOWER" mode, you can set padding as None, and the padding
                 will be computed automatically.
-            odd_padding (tuple of four int): the odd paddding is the value
-                that cannot be handled by the tuple padding (w, h) mode so
-                it needs to firstly handle the input, then use the normal
-                padding method.
+            pad_mode (string): can be NOTSET, SAME_UPPER, or SAME_LOWER, where
+                default value is NOTSET, which means explicit padding is used.
+                SAME_UPPER or SAME_LOWER mean pad the input so that the output
+                spatial size match the input. In case of odd number add the extra
+                padding at the end for SAME_UPPER and at the beginning for SAME_LOWER.
         """
         super(MaxPool2d, self).__init__(kernel_size, stride, padding, True,
-                                        odd_padding)
+                                        pad_mode)
 
 
 class AvgPool2d(Pooling2d):
@@ -753,7 +810,7 @@ class AvgPool2d(Pooling2d):
                  kernel_size,
                  stride=None,
                  padding=0,
-                 odd_padding=(0, 0, 0, 0)):
+                 pad_mode="NOTSET"):
         """
         Args:
             kernel_size (int or tuple): kernel size for two direction of each
@@ -765,13 +822,14 @@ class AvgPool2d(Pooling2d):
                 as kernel size. However, if you set pad_mode as "SAME_UPPER" or
                 "SAME_LOWER" mode, you can set padding as None, and the padding
                 will be computed automatically.
-            odd_padding (tuple of four int): the odd paddding is the value
-                that cannot be handled by the tuple padding (w, h) mode so
-                it needs to firstly handle the input, then use the normal
-                padding method.
+            pad_mode (string): can be NOTSET, SAME_UPPER, or SAME_LOWER, where
+                default value is NOTSET, which means explicit padding is used.
+                SAME_UPPER or SAME_LOWER mean pad the input so that the output
+                spatial size match the input. In case of odd number add the extra
+                padding at the end for SAME_UPPER and at the beginning for SAME_LOWER.
         """
         super(AvgPool2d, self).__init__(kernel_size, stride, padding, False,
-                                        odd_padding)
+                                        pad_mode)
 
 
 class MaxPool1d(Pooling2d):
@@ -783,7 +841,7 @@ class MaxPool1d(Pooling2d):
                  kernel_size,
                  stride=None,
                  padding=0,
-                 odd_padding=(0, 0, 0, 0)):
+                 pad_mode="NOTSET"):
         """
         Args:
             kernel_size (int or tuple): kernel size for two direction of each
@@ -795,15 +853,16 @@ class MaxPool1d(Pooling2d):
                 as kernel size. However, if you set pad_mode as "SAME_UPPER" or
                 "SAME_LOWER" mode, you can set padding as None, and the padding
                 will be computed automatically.
-            odd_padding (tuple of four int): the odd paddding is the value
-                that cannot be handled by the tuple padding (w, h) mode so
-                it needs to firstly handle the input, then use the normal
-                padding method.
+            pad_mode (string): can be NOTSET, SAME_UPPER, or SAME_LOWER, where
+                default value is NOTSET, which means explicit padding is used.
+                SAME_UPPER or SAME_LOWER mean pad the input so that the output
+                spatial size match the input. In case of odd number add the extra
+                padding at the end for SAME_UPPER and at the beginning for SAME_LOWER.
         """
         if stride is None:
             stride = kernel_size
         super(MaxPool1d, self).__init__((1, kernel_size), (1, stride),
-                                        (0, padding), True, odd_padding)
+                                        (0, padding), True, pad_mode)
 
 
 class AvgPool1d(Pooling2d):
@@ -815,7 +874,7 @@ class AvgPool1d(Pooling2d):
                  kernel_size,
                  stride=None,
                  padding=0,
-                 odd_padding=(0, 0, 0, 0)):
+                 pad_mode="NOTSET"):
         """
         Args:
             kernel_size (int or tuple): kernel size for two direction of each
@@ -827,15 +886,16 @@ class AvgPool1d(Pooling2d):
                 as kernel size. However, if you set pad_mode as "SAME_UPPER" or
                 "SAME_LOWER" mode, you can set padding as None, and the padding
                 will be computed automatically.
-            odd_padding (tuple of four int): the odd paddding is the value
-                that cannot be handled by the tuple padding (w, h) mode so
-                it needs to firstly handle the input, then use the normal
-                padding method.
+            pad_mode (string): can be NOTSET, SAME_UPPER, or SAME_LOWER, where
+                default value is NOTSET, which means explicit padding is used.
+                SAME_UPPER or SAME_LOWER mean pad the input so that the output
+                spatial size match the input. In case of odd number add the extra
+                padding at the end for SAME_UPPER and at the beginning for SAME_LOWER.
         """
         if stride is None:
             stride = kernel_size
         super(AvgPool1d, self).__init__((1, kernel_size), (1, stride),
-                                        (0, padding), False, odd_padding)
+                                        (0, padding), False, pad_mode)
 
 
 class RNN_Base(Layer):

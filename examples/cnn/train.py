@@ -99,6 +99,7 @@ def run(global_rank,
         data,
         sgd,
         graph,
+        verbosity,
         dist_option='fp32',
         spars=None):
     dev = device.create_cuda_gpu_on(local_rank)
@@ -123,7 +124,7 @@ def run(global_rank,
 
     if model == 'resnet':
         from model import resnet
-        model = resnet.resnet18(num_channels=num_channels,
+        model = resnet.resnet50(num_channels=num_channels,
                                 num_classes=num_classes)
     elif model == 'xceptionnet':
         from model import xceptionnet
@@ -184,7 +185,8 @@ def run(global_rank,
     # attached model to graph
     model.on_device(dev)
     model.set_optimizer(sgd)
-    model.graph(graph, sequential)
+    model.compile([tx], is_train=True, use_graph=graph, sequential=sequential)
+    dev.SetVerbosity(verbosity)
 
     # Training and Evaluation Loop
     for epoch in range(max_epoch):
@@ -254,6 +256,8 @@ def run(global_rank,
                    time.time() - start_time),
                   flush=True)
 
+    dev.PrintTimeProfiling()
+
 
 if __name__ == '__main__':
     # use argparse to get command config: max_epoch, model, data, etc. for single gpu training
@@ -296,9 +300,15 @@ if __name__ == '__main__':
                         action='store_false',
                         help='disable graph',
                         dest='graph')
+    parser.add_argument('--verbosity',
+                        '--log-verbosity',
+                        default=0,
+                        type=int,
+                        help='logging verbosity',
+                        dest='verbosity')
 
     args = parser.parse_args()
 
     sgd = opt.SGD(lr=args.lr, momentum=0.9, weight_decay=1e-5)
     run(0, 1, args.device_id, args.max_epoch, args.batch_size, args.model,
-        args.data, sgd, args.graph)
+        args.data, sgd, args.graph, args.verbosity)

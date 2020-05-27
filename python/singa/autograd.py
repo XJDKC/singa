@@ -295,10 +295,9 @@ class Operator(object):
         if not isinstance(ys, tuple):
             ys = (ys,)
         # if not training, backward pass is not required, thus creator should not be set
+        creator = None
         if training:
             creator = self
-        else:
-            creator = None
         # create Tensor based on CTensor(data);
         # assume outputs are all Tensor instances
         ys = tuple(
@@ -1424,10 +1423,6 @@ class _Conv2d(Operator):
         assert x.nDim() == 4, "The dimensions of input should be 4D."
         if self.odd_padding != (0, 0, 0, 0):
             x = utils.handle_odd_pad_fwd(x, self.odd_padding)
-            # re-new a handle with updated x
-            if self.re_new_handle:
-                self.re_new_handle = False
-                self.handle = utils.re_new_handle(self.handle, x)
 
         if training:
             if self.handle.bias_term:
